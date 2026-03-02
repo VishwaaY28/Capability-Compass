@@ -67,7 +67,7 @@ class AzureOpenAIClient:
                         endpoint = endpoint_secret.value
                         api_version_secret = kvclient.get_secret("llm-mini-version")
                         api_version = api_version_secret.value
-                        model_secret = kvclient.get_secret("llm-mini")
+                        model_secret = kvclient.get_secret("llm-5")
                         model = model_secret.value
                         logger.info("Endpoint loaded from Key Vault")
                     except Exception as e:

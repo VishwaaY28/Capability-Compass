@@ -984,19 +984,20 @@ async def export_capability_csv(capability_id: int):
 
     output = io.StringIO()
     fieldnames = [
+        "Vertical",
         "capability_name",
-        "domain",
         "process_type",
         "process_name",
         "process_description",
         "process_category",
         "subprocess_name",
         "subprocess_description",
-        "subprocess_category",
         "data_entity_name",
         "data_entity_description",
-        "subprocess_application",
-        "subprocess_api",
+        "data_element_name",
+        "data_element_description",
+        "application",
+        "api",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -1011,19 +1012,20 @@ async def export_capability_csv(capability_id: int):
 
         if not subs:
             writer.writerow({
+                "Vertical": subvertical_name,
                 "capability_name": cap.name,
-                "domain": subvertical_name,
                 "process_type": getattr(p.level, 'value', p.level),
                 "process_name": p.name,
                 "process_description": p.description or "",
                 "process_category": p.category or "",
                 "subprocess_name": "",
                 "subprocess_description": "",
-                "subprocess_category": "",
                 "data_entity_name": "",
                 "data_entity_description": "",
-                "subprocess_application": "",
-                "subprocess_api": "",
+                "data_element_name": "",
+                "data_element_description": "",
+                "application": "",
+                "api": "",
             })
         else:
             for s in subs:
@@ -1034,37 +1036,63 @@ async def export_capability_csv(capability_id: int):
                 
                 if not data_entities:
                     writer.writerow({
+                        "Vertical": subvertical_name,
                         "capability_name": cap.name,
-                        "domain": subvertical_name,
                         "process_type": getattr(p.level, 'value', p.level),
                         "process_name": p.name,
                         "process_description": p.description or "",
                         "process_category": p.category or "",
                         "subprocess_name": s.name,
                         "subprocess_description": s.description or "",
-                        "subprocess_category": s.category or "",
                         "data_entity_name": "",
                         "data_entity_description": "",
-                        "subprocess_application": getattr(s, "application", None) or "",
-                        "subprocess_api": getattr(s, "api", None) or "",
+                        "data_element_name": "",
+                        "data_element_description": "",
+                        "application": getattr(s, "application", None) or "",
+                        "api": getattr(s, "api", None) or "",
                     })
                 else:
                     for de in data_entities:
-                        writer.writerow({
-                            "capability_name": cap.name,
-                            "domain": subvertical_name,
-                            "process_type": getattr(p.level, 'value', p.level),
-                            "process_name": p.name,
-                            "process_description": p.description or "",
-                            "process_category": p.category or "",
-                            "subprocess_name": s.name,
-                            "subprocess_description": s.description or "",
-                            "subprocess_category": s.category or "",
-                            "data_entity_name": de.name,
-                            "data_entity_description": de.description or "",
-                            "subprocess_application": getattr(s, "application", None) or "",
-                            "subprocess_api": getattr(s, "api", None) or "",
-                        })
+                        try:
+                            data_elements = await de.data_elements.all()
+                        except Exception:
+                            data_elements = []
+                        
+                        if not data_elements:
+                            writer.writerow({
+                                "Vertical": subvertical_name,
+                                "capability_name": cap.name,
+                                "process_type": getattr(p.level, 'value', p.level),
+                                "process_name": p.name,
+                                "process_description": p.description or "",
+                                "process_category": p.category or "",
+                                "subprocess_name": s.name,
+                                "subprocess_description": s.description or "",
+                                "data_entity_name": de.name,
+                                "data_entity_description": de.description or "",
+                                "data_element_name": "",
+                                "data_element_description": "",
+                                "application": getattr(s, "application", None) or "",
+                                "api": getattr(s, "api", None) or "",
+                            })
+                        else:
+                            for del_elem in data_elements:
+                                writer.writerow({
+                                    "Vertical": subvertical_name,
+                                    "capability_name": cap.name,
+                                    "process_type": getattr(p.level, 'value', p.level),
+                                    "process_name": p.name,
+                                    "process_description": p.description or "",
+                                    "process_category": p.category or "",
+                                    "subprocess_name": s.name,
+                                    "subprocess_description": s.description or "",
+                                    "data_entity_name": de.name,
+                                    "data_entity_description": de.description or "",
+                                    "data_element_name": del_elem.name,
+                                    "data_element_description": del_elem.description or "",
+                                    "application": getattr(s, "application", None) or "",
+                                    "api": getattr(s, "api", None) or "",
+                                })
 
     csv_bytes = output.getvalue().encode("utf-8")
     output.close()

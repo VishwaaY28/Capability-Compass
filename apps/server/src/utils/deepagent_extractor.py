@@ -196,7 +196,7 @@ def _get_azure_llm():
         api_version = kv_client.get_secret("llm-mini-version").value
         api_key = kv_client.get_secret("llm-api-key").value
         endpoint = kv_client.get_secret("llm-base-endpoint").value
-        deployment = kv_client.get_secret("llm-mini").value
+        deployment = kv_client.get_secret("llm-5").value
 
         llm = AzureChatOpenAI(
             azure_deployment=deployment,
@@ -256,7 +256,7 @@ def _build_depth_instruction(extraction_depth: str) -> str:
         }
     }
     
-    depth_config = depth_map.get(extraction_depth, depth_map["process"])
+    depth_config = depth_map.get(extraction_depth, depth_map["data_element"])
     
     return f"""
 
@@ -271,7 +271,7 @@ async def extract_capability_model(
     output_dir: Optional[str] = None,
     vertical: Optional[str] = None,
     subvertical: Optional[str] = None,
-    extraction_depth: str = "process"
+    extraction_depth: str = "data_element"
 ) -> AsyncGenerator[Dict, None]:
     """
     Extract capability model from a document using DeepAgent.

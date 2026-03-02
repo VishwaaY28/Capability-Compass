@@ -56,8 +56,8 @@ class CSVExporter:
             # Write to CSV
             with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
                 fieldnames = [
+                    "Vertical",
                     "capability_name",
-                    "domain",
                     "process_type",
                     "process_name",
                     "process_description",
@@ -65,6 +65,10 @@ class CSVExporter:
                     "subprocess_name",
                     "subprocess_description",
                     "subprocess_category",
+                    "data_entity_name",
+                    "data_entity_description",
+                    "data_element_name",
+                    "data_element_description",
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
@@ -76,8 +80,8 @@ class CSVExporter:
                     if not subprocesses:
                         # Write process without subprocesses
                         writer.writerow({
+                            "Vertical": domain,
                             "capability_name": capability_name,
-                            "domain": domain,
                             "process_type": process_type,
                             "process_name": process.get("name", ""),
                             "process_description": process.get("description", ""),
@@ -85,13 +89,17 @@ class CSVExporter:
                             "subprocess_name": "",
                             "subprocess_description": "",
                             "subprocess_category": "",
+                            "data_entity_name": "",
+                            "data_entity_description": "",
+                            "data_element_name": "",
+                            "data_element_description": "",
                         })
                     else:
                         # Write process with each subprocess on a separate row
                         for subprocess in subprocesses:
                             writer.writerow({
+                                "Vertical": domain,
                                 "capability_name": capability_name,
-                                "domain": domain,
                                 "process_type": process_type,
                                 "process_name": process.get("name", ""),
                                 "process_description": process.get("description", ""),
@@ -99,6 +107,10 @@ class CSVExporter:
                                 "subprocess_name": subprocess.get("name", ""),
                                 "subprocess_description": subprocess.get("description", ""),
                                 "subprocess_category": subprocess.get("category", ""),
+                                "data_entity_name": "",
+                                "data_entity_description": "",
+                                "data_element_name": "",
+                                "data_element_description": "",
                             })
 
             logger.info(f"CSV file created successfully: {filepath.absolute()}")
