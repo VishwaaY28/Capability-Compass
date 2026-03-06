@@ -141,9 +141,9 @@ class AzureOpenAIThinkingClient:
                         # endpoint = kv_client.get_secret("llm-base-endpoint").value
                         # deployment = kv_client.get_secret("llm-mini").value
                         api_version = kv_client.get_secret("llm-mini-version").value
-                        api_key = kv_client.get_secret("kimi-preview-key").value
-                        endpoint = kv_client.get_secret("kimi-preview-endpoint").value
-                        deployment = "Kimi-K2-Thinking"
+                        api_key = kv_client.get_secret("llm-api-key").value
+                        endpoint = kv_client.get_secret("llm-base-endpoint").value
+                        deployment = kv_client.get_secret("llm-5").value
                         
                         # Strip whitespace from all values
                         api_key = api_key.strip() if api_key else None
@@ -192,16 +192,18 @@ class AzureOpenAIThinkingClient:
 
             # Ensure endpoint doesn't have trailing slashes or path
             endpoint = config["endpoint"]
+            api_version = config["api_version"]
             base_url = endpoint.split("/chat/completions")[0]
-            # self._client = AzureOpenAI(
-            #     api_key=config["api_key"],
-            #     api_version=config["api_version"],
-            #     azure_endpoint=endpoint
-            # )
-            self._client = OpenAI(
+            self._client = AzureOpenAI(
                 api_key=config["api_key"],
-                base_url=base_url,
+                api_version=config["api_version"],
+                azure_endpoint=endpoint
             )
+            # self._client = OpenAI(
+            #     api_key=config["api_key"],
+            #     base_url=base_url,
+            #     api_version=api_version,
+            # )
             logger.info(f"Azure OpenAI client initialized successfully with endpoint: {endpoint}")
 
         return self._client
@@ -1099,9 +1101,10 @@ You are an expert Enterprise Architecture Consultant for the Capital Markets Vir
 - Investment Analyst: Maximum fidelity. Include technical IDs, Data Element definitions, and exhaustive lineage mapping.
  
 ### RESPONSE STRUCTURE
-1. TARGET ENTITY: [Target Entity: Name]
-2. ANALYSIS: Map the query to the meta-model and justify your response "altitude" based on the Persona.
-3. TAILORED RESPONSE: The persona-specific synthesis.
+1. Give your thinking inside the thinking tag: <thinking> [Your step-by-step reasoning process - reference external sources] </thinking>
+2. TARGET ENTITY: [Target Entity: Name]
+3. ANALYSIS: Map the query to the meta-model and justify your response "altitude" based on the Persona.
+4. TAILORED RESPONSE: The persona-specific synthesis.
 """
         return system_message
 

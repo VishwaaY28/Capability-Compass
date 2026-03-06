@@ -13,7 +13,6 @@ import tempfile
 from typing import List, Dict, AsyncGenerator, Optional
 from pathlib import Path
 from datetime import datetime
-
 from deepagents import create_deep_agent
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -118,6 +117,49 @@ def write_json(path: str, data: dict) -> str:
     return str(candidate)
 
 
+def save_document_chunks(chunks: List[Dict], filename: str, chunks_dir: str = "document_chunks") -> str:
+    """
+    Save document chunks to a JSON file in the document chunks folder.
+    
+    Args:
+        chunks: List of chunk dictionaries with 'text' and 'metadata' keys
+        filename: Base filename for the chunks file (without extension)
+        chunks_dir: Directory to save chunks (default: 'document_chunks')
+        
+    Returns:
+        Actual path where chunks file was written
+    """
+    chunks_path = Path(chunks_dir)
+    chunks_path.mkdir(parents=True, exist_ok=True)
+    
+    base = filename
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    candidate = chunks_path / f"{base}_chunks_{ts}.json"
+    
+    # Handle file collisions
+    counter = 2
+    while candidate.exists():
+        candidate = chunks_path / f"{base}_chunks_{ts}_{counter}.json"
+        counter += 1
+    
+    # Prepare chunks data with metadata
+    chunks_data = {
+        "metadata": {
+            "total_chunks": len(chunks),
+            "chunk_size": len(chunks[0]["text"]) if chunks else 0,
+            "created_at": datetime.now().isoformat(),
+            "source_file": filename
+        },
+        "chunks": chunks
+    }
+    
+    with candidate.open("w", encoding="utf-8") as f:
+        json.dump(chunks_data, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"Document chunks saved to {candidate}")
+    return str(candidate)
+
+
 EXTRACTION_INSTRUCTIONS = """
 You are an expert Enterprise Architecture Consultant. Your job is to read a source document and produce a
 normalized, ID-stable capability model with explicit relationships.
@@ -137,6 +179,7 @@ OUTPUT CONTRACT (must be STRICT JSON; no markdown; no commentary):
       "level": "",
       "description": "",
       "category": "",
+      "reference": "Reference content chunks for this process",
       "subprocesses": [
         {
           "id": 1,
@@ -177,6 +220,7 @@ REQUIREMENTS:
 - Preserve relationships using explicit IDs
 - Prefer nouns for Capabilities and Processes; Subprocesses are action-centric but concise.
 - Data Entities are business nouns; Data Elements are atomic attributes on entities with datatypes.
+- Add reference chunks from the document for the processes.
 - Return only the JSON object (no extra text, no markdown).
 """
 
@@ -212,17 +256,25 @@ def _get_azure_llm():
         raise
 
 
-def build_extraction_agent():
+def build_extraction_agent(pre_loaded_chunks: List[Dict]):
     """
     Build and configure the DeepAgent for capability extraction.
+    
+    Args:
+        pre_loaded_chunks: Pre-loaded document chunks to avoid agent calling load_document
     
     Returns:
         Configured DeepAgent instance with tools and system prompt
     """
+    # Create a wrapper function that returns pre-loaded chunks (prevents re-loading)
+    def get_cached_chunks(path: str = None) -> List[Dict]:
+        """Returns pre-loaded chunks instead of loading from disk"""
+        return pre_loaded_chunks
+    
     llm = _get_azure_llm()
     agent = create_deep_agent(
         model=llm,
-        tools=[load_document, write_json],
+        tools=[get_cached_chunks, write_json],  # Use cached chunks getter, not file loader
         system_prompt=EXTRACTION_INSTRUCTIONS,
     )
     return agent
@@ -312,7 +364,7 @@ async def extract_capability_model(
             "filename": os.path.basename(file_path)
         }
         
-        # Step 1: Load and chunk the document
+        # Step 1: Load and chunk the document ONCE, before agent creation
         yield {
             "status": "loading",
             "progress": 10,
@@ -321,52 +373,59 @@ async def extract_capability_model(
         
         chunks = load_document(file_path)
         chunk_count = len(chunks)
+        logger.info(f"[Extractor] Loaded {chunk_count} chunks from document")
+        
         yield {
             "status": "loading",
-            "progress": 30,
+            "progress": 25,
             "message": f"Loaded {chunk_count} document chunks"
         }
-        # Step 2: Build the agent
+        
+        # Save chunks to document_chunks folder
+        source_filename = Path(file_path).stem
+        chunks_output_path = save_document_chunks(chunks, source_filename)
+        logger.info(f"Chunks saved to: {chunks_output_path}")
+        
+        yield {
+            "status": "loading",
+            "progress": 35,
+            "message": f"Saved {chunk_count} chunks to document_chunks folder"
+        }
+        
+        # Step 2: Build extraction instructions based on depth
         yield {
             "status": "extracting",
             "progress": 40,
             "message": "Initializing extraction agent..."
         }
         
-        # Build extraction instructions based on depth and manual overrides
         depth_instructions = _build_depth_instruction(extraction_depth)
         agent_instructions = EXTRACTION_INSTRUCTIONS + depth_instructions
         
-        # Create agent with modified instructions
-        llm = _get_azure_llm()
-        agent = create_deep_agent(
-            model=llm,
-            tools=[load_document, write_json],
-            system_prompt=agent_instructions,
-        )
+        # Create agent with pre-loaded chunks (prevents agent from re-loading document)
+        agent = build_extraction_agent(chunks)
+        # Update the agent's system prompt with depth instructions
+        agent.system_prompt = agent_instructions
         
         output_dir = "Json_Documents"
-        # Step 3: Create temp output path
-        if output_dir is None:
-            output_dir = tempfile.gettempdir()
-        
         output_path = os.path.join(output_dir, "extracted_capability_model.json")
         
-        # Step 4: Invoke the agent with explicit task including vertical, subvertical, and depth
+        # Step 3: Build task - NO longer ask agent to load_document since it's pre-loaded
         yield {
             "status": "extracting",
             "progress": 50,
             "message": "Processing with LLM (this may take a moment)..."
         }
         
-        # Build task with user-provided configuration
+        # Build task WITHOUT load_document tool call - chunks are already provided
         task_parts = [
-            f"1) Call tool=load_document with path=`{file_path}` to ingest content.",
+            "The document has been pre-loaded and chunked. The chunks are available to you via the get_cached_chunks tool.",
+            "Your task:",
+            "1) Call tool=get_cached_chunks (no parameters needed) to retrieve the pre-loaded chunks.",
             "2) Analyze all chunks and construct the JSON capability model per OUTPUT CONTRACT.",
             "\nMANDATORY CONFIGURATION (MUST FOLLOW):",
         ]
         
-        # Always include configuration even if defaults
         if vertical:
             task_parts.append(f"- VERTICAL NAME: Set to '{vertical}' (user-provided, do not override)")
         if subvertical:
@@ -377,16 +436,17 @@ async def extract_capability_model(
         
         task = "\n".join(task_parts)
         
-        # Log the complete task being sent to agent
-        logger.info(f"[Extractor] Task being sent to agent:\n{task}")
-        logger.info(f"[Extractor] Configuration summary - vertical: {repr(vertical)}, subvertical: {repr(subvertical)}, depth: {repr(extraction_depth)}")
+        logger.info(f"[Extractor] Agent task:\n{task}")
+        logger.info(f"[Extractor] Configuration - vertical: {repr(vertical)}, subvertical: {repr(subvertical)}, depth: {repr(extraction_depth)}")
         
-        # Run in executor to avoid blocking
+        # Step 4: Run agent ONCE with pre-loaded context
         def run_agent():
             return agent.invoke({"messages": [{"role": "user", "content": task}]})
         
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, run_agent)
+        
+        logger.info(f"[Extractor] Agent execution completed")
         
         yield {
             "status": "extracting",
@@ -394,7 +454,7 @@ async def extract_capability_model(
             "message": "Extracting JSON from LLM response..."
         }
         
-        # Step 5: Extract and validate the JSON from the response
+        # Step 5: Extract JSON from response
         final_msg = result["messages"][-1].content if "messages" in result else str(result)
         
         # Try to parse JSON from the response
@@ -403,6 +463,7 @@ async def extract_capability_model(
         # Try direct JSON parse
         try:
             extracted_data = json.loads(final_msg)
+            logger.info("[Extractor] Successfully parsed JSON from agent response")
         except json.JSONDecodeError:
             # Try to find JSON in the response (between { and })
             import re
@@ -410,10 +471,12 @@ async def extract_capability_model(
             if json_match:
                 try:
                     extracted_data = json.loads(json_match.group())
+                    logger.info("[Extractor] Successfully extracted JSON from agent response text")
                 except json.JSONDecodeError:
                     pass
         
         if not extracted_data:
+            logger.error(f"[Extractor] Failed to parse JSON from response: {final_msg[:500]}")
             yield {
                 "status": "error",
                 "error": "Failed to extract valid JSON from LLM response",
@@ -421,7 +484,7 @@ async def extract_capability_model(
             }
             return
         
-        # Step 6: Apply manual overrides if provided (overrides LLM values)
+        # Step 6: Apply manual overrides if provided
         if vertical:
             extracted_data["vertical"] = vertical
         if subvertical:
@@ -429,6 +492,7 @@ async def extract_capability_model(
         
         # Step 7: Save the extracted data
         final_path = write_json(output_path, extracted_data)
+        logger.info(f"[Extractor] Saved extracted model to: {final_path}")
         
         yield {
             "status": "success",
@@ -436,6 +500,7 @@ async def extract_capability_model(
             "message": "Extraction complete",
             "data": extracted_data,
             "output_path": final_path,
+            "chunks_path": chunks_output_path,
             "chunk_count": chunk_count
         }
         

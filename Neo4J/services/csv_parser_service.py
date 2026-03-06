@@ -27,11 +27,17 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
     data_entity_per_subprocess = {}  # {capability_name: {process_name: {subprocess_name: {entity_name}}}}
     data_element_per_entity = {}  # {capability_name: {process_name: {subprocess_name: {entity_name: {element_name}}}}}
 
-    def get_uid(entity_type: str, name: str) -> int:
-        if name in uid_maps[entity_type]:
-            return uid_maps[entity_type][name]
+    def get_uid(entity_type: str, name: str, capability_name: str = None) -> int:
+        # For capability, use just the name; for others, scope by capability
+        if entity_type == 'capability':
+            key = name
+        else:
+            key = f"{capability_name}#{name}" if capability_name else name
+        
+        if key in uid_maps[entity_type]:
+            return uid_maps[entity_type][key]
         uid_counters[entity_type] += 1
-        uid_maps[entity_type][name] = uid_counters[entity_type]
+        uid_maps[entity_type][key] = uid_counters[entity_type]
         return uid_counters[entity_type]
 
     with open(csv_path, 'r', encoding='latin-1') as f:
@@ -61,7 +67,7 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
 
             if cap_name not in capabilities:
                 capabilities[cap_name] = {
-                    'id': get_uid('capability', cap_name),
+                    'id': get_uid('capability', cap_name, None),
                     'name': cap_name,
                     'description': '',
                     'vertical': 'Capital Markets',
@@ -73,7 +79,7 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
 
             if proc_name and proc_name not in cap['processes']:
                 cap['processes'][proc_name] = {
-                    'id': get_uid('process', proc_name),
+                    'id': get_uid('process', proc_name, cap_name),
                     'name': proc_name,
                     'description': proc_desc,
                     'level': 1,
@@ -91,7 +97,7 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
                 if subproc_name not in subprocess_per_capability[cap_name][proc_name]:
                     if subproc_name not in proc['subprocesses']:
                         proc['subprocesses'][subproc_name] = {
-                            'id': get_uid('subprocess', subproc_name),
+                            'id': get_uid('subprocess', subproc_name, cap_name),
                             'name': subproc_name,
                             'description': subproc_desc,
                             'category': 'Back Office',
@@ -108,7 +114,7 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
                     if entity_name not in data_entity_per_subprocess[cap_name][proc_name].get(subproc_name, set()):
                         if entity_name not in subproc['data_entities']:
                             subproc['data_entities'][entity_name] = {
-                                'data_entity_id': get_uid('data_entity', entity_name),
+                                'data_entity_id': get_uid('data_entity', entity_name, cap_name),
                                 'data_entity_name': entity_name,
                                 'data_entity_description': entity_desc,
                                 'data_elements': OrderedDict()
@@ -126,7 +132,7 @@ def parse_csv_to_nested_json(csv_path: str) -> List[Dict[str, Any]]:
                         if element_name not in data_element_per_entity[cap_name].get(key, set()):
                             if element_name not in entity['data_elements']:
                                 entity['data_elements'][element_name] = {
-                                    'data_element_id': get_uid('data_element', element_name),
+                                    'data_element_id': get_uid('data_element', element_name, cap_name),
                                     'data_element_name': element_name,
                                     'data_element_description': element_desc
                                 }

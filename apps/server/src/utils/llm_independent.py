@@ -57,10 +57,9 @@ class AzureOpenAIIndependentClient:
                         # endpoint = kv_client.get_secret("llm-base-endpoint").value
                         # deployment = kv_client.get_secret("llm-mini").value
                         api_version = kv_client.get_secret("llm-mini-version").value
-                        api_key = kv_client.get_secret("kimi-preview-key").value
-                        endpoint = kv_client.get_secret("kimi-preview-endpoint").value
-                        deployment = "Kimi-K2-Thinking"
-                        
+                        api_key = kv_client.get_secret("llm-api-key").value
+                        endpoint = kv_client.get_secret("llm-base-endpoint").value
+                        deployment = kv_client.get_secret("llm-5").value
                         # Strip whitespace from all values
                         api_key = api_key.strip() if api_key else None
                         endpoint = endpoint.strip() if endpoint else None
@@ -109,11 +108,15 @@ class AzureOpenAIIndependentClient:
             # Ensure endpoint doesn't have trailing slashes or path
             endpoint = config["endpoint"]
             base_url = endpoint.split("/chat/completions")[0]
-
-            self._client = OpenAI(
+            self._client = AzureOpenAI(
                 api_key=config["api_key"],
-                base_url=base_url
+                api_version=config["api_version"],
+                azure_endpoint=endpoint
             )
+            # self._client = OpenAI(
+            #     api_key=config["api_key"],
+            #     base_url=base_url
+            # )
             logger.info(f"Azure OpenAI client initialized successfully with endpoint: {endpoint}")
 
         return self._client

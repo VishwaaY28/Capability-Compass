@@ -72,7 +72,7 @@ const CompassIngestion: React.FC = () => {
   // Manual input fields
   const [manualVertical, setManualVertical] = useState<string>("");
   const [manualSubVertical, setManualSubVertical] = useState<string>("");
-  const [extractionDepth, setExtractionDepth] = useState<string>("subprocess"); // capability, process, subprocess, data_entity, data_element
+  const [extractionDepth, setExtractionDepth] = useState<string>("data_element"); // capability, process, subprocess, data_entity, data_element
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
