@@ -44,6 +44,7 @@ interface UploadedFile {
   progress: number;
   error?: string;
   extractedData?: ExtractedCapabilityModel;
+  chunks_path?: string;
 }
 
 interface ExtractionEvent {
@@ -52,6 +53,7 @@ interface ExtractionEvent {
   message?: string;
   data?: ExtractedCapabilityModel;
   output_path?: string;
+  chunks_path?: string;
   filename?: string;
   error?: string;
   type?: string;
@@ -284,6 +286,7 @@ const CompassIngestion: React.FC = () => {
                 status: 'success',
                 progress: 100,
                 extractedData: event.data,
+                chunks_path: event.chunks_path,
               };
             }
             return f;
@@ -335,6 +338,7 @@ const CompassIngestion: React.FC = () => {
         },
         body: JSON.stringify({
           model_data: file.extractedData,
+          chunks_path: file.chunks_path || null,
         }),
       });
 
@@ -350,7 +354,9 @@ const CompassIngestion: React.FC = () => {
       const summary = result.summary;
       console.log('Import Summary:', summary);
       toast.success(
-        `Created ${summary.processes_created} processes with ${summary.subprocesses_created} subprocesses`,
+        `Created ${summary.processes_created} processes with ${summary.subprocesses_created} subprocesses${
+          summary.chunks_imported ? ` and ${summary.chunks_imported} knowledge chunks` : ''
+        }`,
         { duration: 4000 }
       );
     } catch (error) {

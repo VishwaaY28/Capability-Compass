@@ -50,7 +50,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         logger.info(f"LLM processing completed")
 
 
-def load_document(path: str, chunk_size: int = 1800, chunk_overlap: int = 200) -> List[Dict]:
+def load_document(path: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Dict]:
     """
     Load .pdf/.docx/.txt and return chunk dicts: [{"text": "...", "metadata": {...}}]
     
@@ -74,7 +74,7 @@ def load_document(path: str, chunk_size: int = 1800, chunk_overlap: int = 200) -
         raise ValueError(f"Unsupported file extension: {ext}")
 
     docs = loader.load()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap, separators=["\n\n", "\n", " ", ""])
     splits = splitter.split_documents(docs)
 
     out: List[Dict] = []

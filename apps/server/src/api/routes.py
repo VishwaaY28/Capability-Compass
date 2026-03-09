@@ -2112,6 +2112,7 @@ async def _build_vertical_context(vertical) -> dict:
 class CapabilityImportRequest(BaseModel):
     """Request to import extracted capability model into the database"""
     model_data: dict  # The extracted capability model JSON
+    chunks_path: Optional[str] = None  # Path to the chunks JSON file for knowledge base insertion
 
 
 @router.post("/upload/pdf")
@@ -2215,6 +2216,95 @@ async def upload_and_extract_pdf(
         pass  # Don't delete yet - extractor may still use it
 
 
+async def _import_chunks_to_knowledge_base(chunks_path: str) -> tuple[int, List[str]]:
+    """
+    Import document chunks from a JSON file into the Knowledge base in Neo4j.
+    
+    Creates or fetches the top-level Knowledge node and creates Chunk nodes
+    for each chunk in the file, linking them to the Knowledge node.
+    
+    Args:
+        chunks_path: Path to the chunks JSON file created during extraction
+        
+    Returns:
+        Tuple of (chunks_imported_count, cypher_lines)
+    """
+    chunks_imported = 0
+    cypher_lines = []
+    
+    try:
+        if not os.path.exists(chunks_path):
+            logger.warning(f"Chunks file not found at {chunks_path}")
+            return chunks_imported, cypher_lines
+        
+        # Load chunks from JSON file
+        with open(chunks_path, 'r', encoding='utf-8') as f:
+            chunks_data = json.load(f)
+        
+        # Ensure chunks_data has the expected structure
+        if isinstance(chunks_data, dict) and "chunks" in chunks_data:
+            chunks = chunks_data["chunks"]
+        else:
+            chunks = chunks_data if isinstance(chunks_data, list) else []
+        
+        if not chunks:
+            logger.info(f"No chunks found in {chunks_path}")
+            return chunks_imported, cypher_lines
+        
+        # Create or get the Knowledge node (global parent for all chunks)
+        cypher_lines.append("MERGE (k:Knowledge {name: 'Knowledge'})")
+        
+        def _esc(val: str) -> str:
+            """Escape string for Cypher queries"""
+            if val is None:
+                return ""
+            s = str(val)
+            s = s.replace('\\', '\\\\')
+            s = s.replace('"', '\\"')
+            s = s.replace("'", "\\'")
+            return s
+        
+        # Create chunk nodes and link to Knowledge
+        for idx, chunk in enumerate(chunks):
+            chunk_text = chunk.get("text", "")
+            metadata = chunk.get("metadata", {})
+            
+            if not chunk_text.strip():
+                continue
+            
+            # Extract metadata
+            page = metadata.get("page", 0)
+            section = metadata.get("section", "Unknown")
+            source = metadata.get("source", "Unknown")
+            
+            chunk_text_truncated = chunk_text
+            
+            # Create unique chunk ID based on source and index
+            chunk_id = f"{source}_{idx}_{page}"
+            
+            # Create Chunk node with properties
+            chunk_var = f"chunk_{idx}"
+            cypher_lines.append(
+                f"MERGE ({chunk_var}:Chunk {{"
+                f"id: '{_esc(chunk_id)}', "
+                f"source: '{_esc(source)}', "
+                f"section: '{_esc(section)}', "
+                f"page: {page}, "
+                f"text: '{_esc(chunk_text_truncated)}'"
+                f"}})"
+            )
+            
+            # Create relationship from Knowledge to Chunk
+            cypher_lines.append(f"MERGE (k)-[:CONTAINS_CHUNK]->({chunk_var})")
+            chunks_imported += 1
+        logger.info(f"Prepared {chunks_imported} chunks for import from {chunks_path}")
+        
+    except Exception as e:
+        logger.error(f"Error processing chunks file {chunks_path}: {e}", exc_info=True)
+    
+    return chunks_imported, cypher_lines
+
+
 @router.post("/upload/import-to-graph")
 async def import_extracted_model_to_graph(payload: CapabilityImportRequest):
     """
@@ -2222,13 +2312,14 @@ async def import_extracted_model_to_graph(payload: CapabilityImportRequest):
     
     Takes the JSON model structure from the DeepAgent extraction
     and imports it as Capability -> Vertical -> SubVertical -> Process -> SubProcess
-    structure in the database.
+    structure in the database. Also imports document chunks into a Knowledge base.
     
     Args:
         payload.model_data: The extracted capability model JSON
+        payload.chunks_path: Optional path to chunks JSON file for knowledge base
         
     Returns:
-        Success response with import summary
+        Success response with import summary including chunks imported
     """
     
     try:
@@ -2470,6 +2561,14 @@ async def import_extracted_model_to_graph(payload: CapabilityImportRequest):
                 logger.warning(f"Failed to persist data entities/elements for process {process_name}: {e}")
         
         logger.info(f"Import completed successfully")
+        
+        # Step 5: Import chunks if chunks_path is provided
+        chunks_imported = 0
+        if payload.chunks_path:
+            chunks_imported, chunks_cypher = await _import_chunks_to_knowledge_base(payload.chunks_path)
+            cypher_lines.extend(chunks_cypher)
+            logger.info(f"Added {chunks_imported} chunks to import")
+        
         # After local DB insertions, attempt to sync to Neo4j cloud via the API
         try:
             import requests
@@ -2499,7 +2598,8 @@ async def import_extracted_model_to_graph(payload: CapabilityImportRequest):
                 "processes_created": process_count,
                 "subprocesses_created": subprocess_count,
                 "data_entities_created": data_entity_count,
-                "data_elements_created": data_element_count
+                "data_elements_created": data_element_count,
+                "chunks_imported": chunks_imported
             }
         })
         
