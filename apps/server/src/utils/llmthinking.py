@@ -7,7 +7,6 @@ and returning both the agent's reasoning process and final results.
 import logging
 import json
 import os
-import time
 import re
 from typing import Dict, Any, Optional, List, Tuple, Callable
 import uuid
@@ -25,11 +24,18 @@ try:
     import requests
 except Exception:
     requests = None
+try:
+    from neo4j_graphrag.retrievers import HybridCypherRetriever
+except Exception:
+    HybridCypherRetriever = None
+try:
+    from neo4j import GraphDatabase
+except Exception:
+    GraphDatabase = None
 from env import env
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 from openai import AzureOpenAI
 from openai import OpenAI
+from config.azure_clients import get_azure_openai_thinking_client, get_azure_config
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +45,65 @@ try:
 except ImportError:
     _has_azure = False
     logger.warning("Azure libraries not installed. Install them to use Azure OpenAI provider.")
+
+
+class AzureOpenAIWrapper:
+    """
+    Wrapper for Azure OpenAI client to provide LangChain-compatible interface.
+    HybridCypherRetriever expects an LLM with an 'invoke' method that returns
+    an object with a .content attribute (like AIMessage from langchain).
+    """
+    def __init__(self, client: AzureOpenAI, config: Dict[str, Any]):
+        self.client = client
+        self.config = config
+        self.model = config.get("deployment", "gpt-4")
+    
+    def invoke(self, prompt: str):
+        """
+        Call the Azure OpenAI API with the given prompt.
+        
+        Returns an object with a .content attribute to match LangChain's AIMessage interface.
+        
+        Args:
+            prompt: The prompt/input to send to the LLM
+            
+        Returns:
+            Object with .content attribute containing the LLM's text response
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            # Extract the text content
+            content = response.choices[0].message.content
+            if isinstance(content, str):
+                # Return an object with .content attribute (like langchain's AIMessage)
+                return AIMessageLike(content)
+            else:
+                return AIMessageLike(str(content))
+        except Exception as e:
+            logger.error(f"Error calling Azure OpenAI in wrapper: {e}")
+            # Return empty message instead of raising to allow graceful degradation
+            return AIMessageLike("")
+
+
+class AIMessageLike:
+    """
+    Minimal object that mimics langchain's AIMessage with a .content attribute.
+    This is used to make our Azure OpenAI response compatible with HybridCypherRetriever.
+    """
+    def __init__(self, content: str):
+        self.content = content
+    
+    def __str__(self):
+        return self.content
+    
+    def __repr__(self):
+        return f"AIMessageLike(content={self.content[:100]}...)"
+
 
 
 class AzureOpenAIThinkingClient:
@@ -55,8 +120,24 @@ class AzureOpenAIThinkingClient:
         self._last_vmo_meta: Dict[str, Any] = {}
         # Store VMO metadata per-request to avoid global overwrite and support lookup by id
         self._vmo_meta_store: Dict[str, Dict[str, Any]] = {}
+        # Initialize HybridCypherRetriever for knowledge chunks
+        self._knowledge_retriever = None
+        self._neo4j_driver = None
         # Load elements_fixed.csv as DF_KNOWLEDGE for persona-aware enrichment
         self.df_knowledge = None
+
+        # Initialize HybridCypherRetriever if available
+        try:
+            if HybridCypherRetriever is not None and GraphDatabase is not None:
+                # Will be initialized lazily when needed to avoid connection errors during startup
+                logger.info("HybridCypherRetriever and Neo4j GraphDatabase are available and will be initialized on first use")
+            else:
+                if HybridCypherRetriever is None:
+                    logger.warning("neo4j_graphrag.retrievers.HybridCypherRetriever not available; knowledge chunk retrieval will be skipped")
+                if GraphDatabase is None:
+                    logger.warning("neo4j.GraphDatabase not available; Neo4j driver cannot be created")
+        except Exception as e:
+            logger.warning(f"Failed to check HybridCypherRetriever availability: {e}")
 
         try:
             if pd is not None:
@@ -65,7 +146,7 @@ class AzureOpenAIThinkingClient:
                     # Try utf-8 first, then fall back to common encodings on decode errors
                     tried_encodings = []
                     df = None
-                    for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+                    for enc in ("latin-1", "cp1252"):
                         try:
                             df = pd.read_csv(csv_path, encoding=enc, low_memory=False)
                             tried_encodings.append(enc)
@@ -121,90 +202,25 @@ class AzureOpenAIThinkingClient:
             self.official_catalog = []
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load Azure OpenAI API configuration from Key Vault with retry logic"""
+        """Get cached Azure OpenAI configuration (loaded at server startup)"""
         if self._config is None:
-            try:
-                # Retry configuration for credential initialization
-                max_retries = 3
-                retry_delay = 0.5  # Start with 0.5 seconds
-                last_error = None
-                
-                for attempt in range(max_retries):
-                    try:
-                        # Initialize credential and Key Vault client
-                        credential = DefaultAzureCredential()
-                        key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
-                        kv_client = SecretClient(vault_url=key_vault_url, credential=credential)
-                        
-                        # Retrieve secrets from Key Vault
-                        # api_key = kv_client.get_secret("llm-api-key").value
-                        # endpoint = kv_client.get_secret("llm-base-endpoint").value
-                        # deployment = kv_client.get_secret("llm-mini").value
-                        api_version = kv_client.get_secret("llm-mini-version").value
-                        api_key = kv_client.get_secret("llm-api-key").value
-                        endpoint = kv_client.get_secret("llm-base-endpoint").value
-                        deployment = kv_client.get_secret("llm-5").value
-                        
-                        # Strip whitespace from all values
-                        api_key = api_key.strip() if api_key else None
-                        endpoint = endpoint.strip() if endpoint else None
-                        deployment = deployment.strip() if deployment else None
-                        api_version = api_version.strip() if api_version else None
-                        
-                        if not all([api_key, endpoint, deployment, api_version]):
-                            logger.warning(f"One or more required Azure secrets are missing (attempt {attempt + 1}/{max_retries})")
-                            logger.warning(f"API Key present: {bool(api_key)}, Endpoint: {bool(endpoint)}, Deployment: {bool(deployment)}, API Version: {bool(api_version)}")
-                            raise ValueError("Missing required Azure Key Vault secrets")
-
-                        self._config = {
-                            "api_key": api_key,
-                            "endpoint": endpoint,
-                            "deployment": deployment,
-                            "api_version": api_version,
-                        }
-                        logger.info(f"Azure OpenAI config loaded - Endpoint: {endpoint}, Deployment: {deployment}, API Version: {api_version}")
-                        break  # Success, exit retry loop
-                        
-                    except Exception as e:
-                        last_error = e
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Failed to load Azure config (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s: {e}")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            logger.error(f"Failed to load Azure config after {max_retries} attempts: {e}")
-                            raise ValueError(f"Failed to load Azure configuration: {e}")
-
-            except Exception as e:
-                logger.error(f"Error loading Azure Key Vault configuration: {e}")
-                raise ValueError(f"Failed to load Azure configuration: {e}")
-
+            self._config = {
+                "api_key": get_azure_config().get("api_key"),
+                "endpoint": get_azure_config().get("endpoint"),
+                "deployment": get_azure_config().get("deployment"),
+                "api_version": get_azure_config().get("api_version"),
+            }
         return self._config
 
     def _get_client(self) -> AzureOpenAI:
-        """Get or create Azure OpenAI client instance"""
+        """Get Azure OpenAI client instance (initialized at server startup)"""
         if self._client is None:
             if not _has_azure:
                 raise ImportError(
                     "Azure libraries are not installed. Install them with: pip install azure-identity azure-keyvault-secrets openai"
                 )
-            config = self._load_config()
-
-            # Ensure endpoint doesn't have trailing slashes or path
-            endpoint = config["endpoint"]
-            api_version = config["api_version"]
-            base_url = endpoint.split("/chat/completions")[0]
-            self._client = AzureOpenAI(
-                api_key=config["api_key"],
-                api_version=config["api_version"],
-                azure_endpoint=endpoint
-            )
-            # self._client = OpenAI(
-            #     api_key=config["api_key"],
-            #     base_url=base_url,
-            #     api_version=api_version,
-            # )
-            logger.info(f"Azure OpenAI client initialized successfully with endpoint: {endpoint}")
+            self._client = get_azure_openai_thinking_client()
+            logger.info(f"Using pre-initialized Azure OpenAI client")
 
         return self._client
 
@@ -246,6 +262,296 @@ class AzureOpenAIThinkingClient:
         except Exception as e:
             logger.warning(f"Default DB fetch to {endpoint} failed: {e}")
             return []
+
+    def _get_neo4j_driver(self):
+        """Get or create a Neo4j driver instance for HybridCypherRetriever."""
+        if self._neo4j_driver is not None:
+            return self._neo4j_driver
+        
+        if GraphDatabase is None:
+            logger.warning("Neo4j GraphDatabase not available, cannot create driver")
+            return None
+        
+        try:
+            neo4j_uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687").strip()
+            neo4j_user = os.getenv("NEO4J_USER", "neo4j").strip()
+            neo4j_password = os.getenv("NEO4J_PASSWORD", "12345678").strip()
+            
+            if not neo4j_uri or not neo4j_user or not neo4j_password:
+                logger.debug(
+                    "Neo4j connection parameters not fully configured. "
+                    "Set NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD environment variables to enable knowledge chunk retrieval. "
+                    "Proceeding without knowledge chunk retrieval."
+                )
+                return None
+            
+            # Create and test the driver connection
+            logger.info(f"Creating Neo4j driver connection to {neo4j_uri}")
+            driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+            
+            # Test the connection with a simple query
+            try:
+                with driver.session() as session:
+                    session.run("RETURN 1")
+                logger.info("Neo4j driver connection established and authenticated successfully")
+                self._neo4j_driver = driver
+                return driver
+            except Exception as connection_error:
+                # Distinguish between different types of errors
+                error_msg = str(connection_error)
+                if "Unauthorized" in error_msg or "authentication" in error_msg.lower():
+                    logger.error(
+                        f"Neo4j Authentication Failed: Invalid credentials for user '{neo4j_user}'. "
+                        f"Please verify NEO4J_USER and NEO4J_PASSWORD are correct. "
+                        f"Error: {connection_error}"
+                    )
+                elif "Connection refused" in error_msg or "unable to connect" in error_msg.lower():
+                    logger.error(
+                        f"Neo4j Connection Failed: Cannot reach Neo4j server at {neo4j_uri}. "
+                        f"Verify the server is running and NEO4J_URI is correct. "
+                        f"Error: {connection_error}"
+                    )
+                else:
+                    logger.error(f"Neo4j Connection Error: {connection_error}")
+                
+                driver.close()
+                return None
+            
+        except Exception as e:
+            logger.warning(f"Failed to create Neo4j driver: {e}")
+            return None
+
+    def _ensure_vector_indexes(self, driver):
+        """
+        Ensure vector and full-text indexes exist for knowledge chunk retrieval.
+        Creates indexes if they don't already exist.
+        
+        Args:
+            driver: Neo4j driver instance
+        """
+        try:
+            with driver.session() as session:
+                # Check and create vector index for embeddings
+                try:
+                    logger.info("[KNOWLEDGE RETRIEVAL] Checking for vector index: chunk_embedding_idx")
+                    result = session.run("SHOW INDEXES WHERE name = 'chunk_embedding_idx'")
+                    indexes = list(result)
+                    if not indexes:
+                        logger.info("[KNOWLEDGE RETRIEVAL] Vector index not found, attempting to create...")
+                        session.run("""
+                            CREATE VECTOR INDEX chunk_embedding_idx IF NOT EXISTS
+                            FOR (c:Chunk) ON (c.embedding)
+                            OPTIONS {
+                                indexConfig: {
+                                    `vector.dimensions`: 1536,
+                                    `vector.similarity_function`: 'cosine'
+                                }
+                            }
+                        """)
+                        logger.info("[KNOWLEDGE RETRIEVAL] Vector index created successfully")
+                    else:
+                        logger.info("[KNOWLEDGE RETRIEVAL] Vector index already exists")
+                except Exception as vec_error:
+                    logger.warning(f"[KNOWLEDGE RETRIEVAL] Could not create vector index: {vec_error}")
+                    # Vector index creation may fail on some Neo4j versions - continue anyway
+                
+                # Check and create full-text index for text search
+                try:
+                    logger.info("[KNOWLEDGE RETRIEVAL] Checking for full-text index: chunk_fulltext_idx")
+                    result = session.run("SHOW INDEXES WHERE name = 'chunk_fulltext_idx'")
+                    indexes = list(result)
+                    if not indexes:
+                        logger.info("[KNOWLEDGE RETRIEVAL] Full-text index not found, attempting to create...")
+                        session.run("""
+                            CREATE FULLTEXT INDEX chunk_fulltext_idx IF NOT EXISTS
+                            FOR (c:Chunk) ON EACH [c.text]
+                        """)
+                        logger.info("[KNOWLEDGE RETRIEVAL] Full-text index created successfully")
+                    else:
+                        logger.info("[KNOWLEDGE RETRIEVAL] Full-text index already exists")
+                except Exception as ft_error:
+                    logger.warning(f"[KNOWLEDGE RETRIEVAL] Could not create full-text index: {ft_error}")
+                    # Full-text index creation may fail - continue anyway
+        except Exception as e:
+            logger.warning(f"[KNOWLEDGE RETRIEVAL] Error ensuring indexes: {e}")
+            raise
+
+    def _retrieve_knowledge_chunks(self, query: str, top_k: int = 5) -> str:
+        """
+        Retrieve top K knowledge chunks from the knowledge nodes in the graph database
+        using HybridCypherRetriever with vector embeddings.
+        
+        HybridCypherRetriever combines vector similarity search with full-text search
+        to retrieve the most relevant knowledge chunks based on embeddings.
+        
+        Args:
+            query: The user's query to retrieve relevant knowledge chunks for
+            top_k: Number of top chunks to retrieve (default: 5)
+            
+        Returns:
+            Formatted string containing the retrieved knowledge chunks, or empty string if retrieval fails
+        """
+        try:
+            logger.info(f"[KNOWLEDGE RETRIEVAL] _retrieve_knowledge_chunks START: query={query[:50]}, _knowledge_retriever={self._knowledge_retriever}, HybridCypherRetriever={HybridCypherRetriever}")
+            
+            if HybridCypherRetriever is None:
+                logger.warning("[KNOWLEDGE RETRIEVAL] HybridCypherRetriever not available, skipping knowledge chunk retrieval")
+                return ""
+            
+            # Initialize retriever lazily if not already done
+            if self._knowledge_retriever is None:
+                logger.info("[KNOWLEDGE RETRIEVAL] Initializing retriever (first call)...")
+                try:
+                    # Get or create Neo4j driver connection
+                    driver = self._get_neo4j_driver()
+                    logger.info(f"[KNOWLEDGE RETRIEVAL] Got Neo4j driver: {driver}")
+                    if driver is None:
+                        logger.warning("[KNOWLEDGE RETRIEVAL] Neo4j driver connection not configured, skipping knowledge retrieval")
+                        return ""
+                    
+                    # Ensure vector indexes exist before initializing retriever
+                    try:
+                        self._ensure_vector_indexes(driver)
+                    except Exception as idx_error:
+                        logger.warning(f"[KNOWLEDGE RETRIEVAL] Could not ensure indexes: {idx_error}")
+                    
+                    # Create embedder for vector search
+                    from utils.deepagent_extractor import _get_azure_llm
+                    _, llm_embedd = _get_azure_llm()
+                    
+                    class SimpleEmbedder:
+                        def __init__(self, embedding_client):
+                            self.client = embedding_client
+                        
+                        def embed_query(self, text: str) -> List[float]:
+                            resp = self.client.embeddings.create(
+                                model="text-embedding-ada-002",
+                                input=[text]
+                            )
+                            return resp.data[0].embedding
+                    
+                    embedder = SimpleEmbedder(llm_embedd)
+                    logger.info("[KNOWLEDGE RETRIEVAL] Created embedder for vector search")
+                    
+                    logger.info("[KNOWLEDGE RETRIEVAL] Initializing HybridCypherRetriever...")
+                    # Initialize HybridCypherRetriever with vector index and full-text index
+                    # Retrieval query returns the chunk node and similarity score
+                    retrieval_query = "RETURN node, score"
+                    self._knowledge_retriever = HybridCypherRetriever(
+                        driver=driver,
+                        vector_index_name="chunk_embedding_idx",
+                        fulltext_index_name="chunk_fulltext_idx",
+                        retrieval_query=retrieval_query,
+                        embedder=embedder,
+                    )
+                    logger.info(f"[KNOWLEDGE RETRIEVAL] HybridCypherRetriever initialized successfully: {self._knowledge_retriever}")
+                except Exception as init_error:
+                    logger.error(f"[KNOWLEDGE RETRIEVAL] Failed to initialize HybridCypherRetriever: {init_error}", exc_info=True)
+                    import traceback
+                    logger.error(f"[KNOWLEDGE RETRIEVAL] Initialization error details:\n{traceback.format_exc()}")
+                    return ""
+            
+            # If retriever is still None at this point (initialization skipped or failed), skip retrieval
+            if self._knowledge_retriever is None:
+                logger.warning("[KNOWLEDGE RETRIEVAL] Retriever is None, skipping knowledge retrieval")
+                return ""
+            
+            logger.info(f"[KNOWLEDGE RETRIEVAL] Using initialized retriever: {self._knowledge_retriever}")
+            
+            # Retrieve chunks using the query with vector similarity
+            logger.info(f"[KNOWLEDGE RETRIEVAL] Retrieving knowledge chunks for query: {query[:50]}...")
+            try:
+                logger.info(f"[KNOWLEDGE RETRIEVAL] About to call get_search_results on retriever: {self._knowledge_retriever}")
+                logger.info(f"[KNOWLEDGE RETRIEVAL] Calling get_search_results with query: {query}")
+                # HybridCypherRetriever uses get_search_results() method for vector + full-text hybrid search
+                result = self._knowledge_retriever.get_search_results(query_text=query, top_k=top_k)
+                logger.info(f"[KNOWLEDGE RETRIEVAL] get_search_results returned successfully")
+                # Log raw result for diagnostics
+                try:
+                    raw_repr = repr(result)
+                except Exception:
+                    raw_repr = str(type(result))
+                logger.info(f"[KNOWLEDGE RETRIEVAL] Raw retriever result type={type(result)} repr={raw_repr[:1000]}")
+
+                # If result is a string that contains JSON, attempt to parse it
+                if isinstance(result, str):
+                    stripped = result.strip()
+                    if (stripped.startswith('{') or stripped.startswith('[')):
+                        try:
+                            result = json.loads(stripped)
+                        except Exception:
+                            pass
+                    else:
+                        if stripped:
+                            logger.info(f"[KNOWLEDGE RETRIEVAL] Retrieved string result (length={len(stripped)} chars)")
+                            return stripped
+                        else:
+                            logger.info("[KNOWLEDGE RETRIEVAL] Retrieved empty string result")
+                            return ""
+
+                # If result is now a list of items
+                if isinstance(result, list):
+                    logger.info(f"[KNOWLEDGE RETRIEVAL] Result is a list with {len(result)} items")
+                    formatted_chunks = []
+                    for idx, chunk in enumerate(result, 1):
+                        chunk_text = None
+                        chunk_score = None
+                        try:
+                            if isinstance(chunk, dict):
+                                node = chunk.get("node", {})
+                                chunk_score = chunk.get("score", 0)
+                                if isinstance(node, dict):
+                                    chunk_text = node.get("text") or node.get("content")
+                                else:
+                                    chunk_text = getattr(node, "text", None) or getattr(node, "content", None)
+                            else:
+                                chunk_text = getattr(chunk, "text", None) or getattr(chunk, "content", None)
+                        except Exception as chunk_error:
+                            logger.warning(f"[KNOWLEDGE RETRIEVAL] Error extracting chunk {idx}: {chunk_error}")
+
+                        if chunk_text and chunk_text.strip():
+                            score_str = f" (score: {chunk_score:.4f})" if chunk_score else ""
+                            formatted_chunks.append(f"[Chunk {idx}{score_str}]\n{chunk_text}")
+
+                    if formatted_chunks:
+                        knowledge_context = "\n---\n".join(formatted_chunks)
+                        logger.info(f"[KNOWLEDGE RETRIEVAL] Successfully retrieved {len(formatted_chunks)} knowledge chunks")
+                        return knowledge_context
+                    else:
+                        logger.info("[KNOWLEDGE RETRIEVAL] No chunks had valid text content")
+                        return ""
+
+                # If result is a dict-like structure, pretty-print and return
+                if isinstance(result, dict):
+                    try:
+                        result_str = json.dumps(result, default=str)
+                    except Exception:
+                        result_str = str(result)
+                    if result_str and result_str.strip():
+                        logger.info(f"[KNOWLEDGE RETRIEVAL] Retrieved dict-like result (length={len(result_str)} chars)")
+                        return result_str
+
+                # Fallback: convert to string
+                result_str = str(result)
+                if result_str and result_str.strip():
+                    logger.info(f"[KNOWLEDGE RETRIEVAL] Successfully retrieved knowledge (converted to string, length: {len(result_str)} chars)")
+                    return result_str
+
+                logger.info("[KNOWLEDGE RETRIEVAL] No knowledge chunks retrieved")
+                return ""
+                
+            except AttributeError as attr_error:
+                logger.warning(f"[KNOWLEDGE RETRIEVAL] AttributeError during retrieval: {attr_error}", exc_info=True)
+                return ""
+            except Exception as retrieval_error:
+                logger.warning(f"[KNOWLEDGE RETRIEVAL] Error retrieving knowledge chunks: {retrieval_error}", exc_info=True)
+                import traceback
+                logger.debug(f"[KNOWLEDGE RETRIEVAL] Traceback: {traceback.format_exc()}")
+                return ""
+            
+        except Exception as e:
+            logger.warning(f"[KNOWLEDGE RETRIEVAL] Outer exception in knowledge retrieval: {e}", exc_info=True)
+            return ""
 
     # --- Entity resolution and NLU helpers that leverage DF_KNOWLEDGE ---
     def _resolve_entity(self, extracted_name: str, threshold: int = 85) -> Optional[str]:
@@ -344,6 +650,18 @@ class AzureOpenAIThinkingClient:
             logger.info(f"Serialized retrieved_context length={len(retrieved_context)} snippet={retrieved_context}")
             if not retrieved_context:
                 logger.warning("No meaningful retrieved graph context was serialized — LLM will receive an empty context block.")
+            
+            # 4a) Retrieve knowledge chunks from the knowledge nodes in the graph database
+            logger.info("[KNOWLEDGE INTEGRATION] Retrieving knowledge chunks to enrich context...")
+            knowledge_chunks = self._retrieve_knowledge_chunks(query, top_k=5)
+            
+            # Append knowledge chunks to the retrieved context if available
+            if knowledge_chunks:
+                retrieved_context = f"{retrieved_context}\n\n### SUPPLEMENTARY KNOWLEDGE FROM KNOWLEDGE BASE:\n{knowledge_chunks}"
+                logger.info(f"[KNOWLEDGE INTEGRATION] Successfully appended knowledge chunks to context (new length: {len(retrieved_context)} chars)")
+            else:
+                logger.info("[KNOWLEDGE INTEGRATION] No additional knowledge chunks were retrieved")
+            
             vmo_prompt = self._create_vmo_prompt(query, plan, retrieved_context, vertical)
             self._last_system_prompt = vmo_prompt
             
@@ -453,6 +771,18 @@ class AzureOpenAIThinkingClient:
                 normalized = db_records
 
             retrieved_context = self._serialize_db_records(normalized, plan)
+            
+            # Retrieve knowledge chunks from the knowledge nodes in the graph database
+            logger.info("[KNOWLEDGE INTEGRATION] Retrieving knowledge chunks to enrich context...")
+            knowledge_chunks = self._retrieve_knowledge_chunks(query, top_k=5)
+            
+            # Append knowledge chunks to the retrieved context if available
+            if knowledge_chunks:
+                retrieved_context = f"{retrieved_context}\n\n### SUPPLEMENTARY KNOWLEDGE FROM KNOWLEDGE BASE:\n{knowledge_chunks}"
+                logger.info(f"[KNOWLEDGE INTEGRATION] Successfully appended knowledge chunks to context (new length: {len(retrieved_context)} chars)")
+            else:
+                logger.info("[KNOWLEDGE INTEGRATION] No additional knowledge chunks were retrieved")
+            
             system_prompt = self._create_vmo_prompt(query, plan, retrieved_context, vertical)
             user_prompt = self._create_user_message(query, plan, retrieved_context, vertical)
 

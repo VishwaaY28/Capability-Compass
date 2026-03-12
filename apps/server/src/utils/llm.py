@@ -1,14 +1,12 @@
 import logging
 from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 from typing import List, Dict, Any, Optional
 from env import env
 import json
 import re
 import ast
-import time
 from utils.llm_call_logger import get_llm_call_logger
+from config.azure_clients import get_azure_openai_client, get_azure_config
 
 try:
     import yaml  # type: ignore
@@ -30,108 +28,31 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
 
 class AzureOpenAIClient:
     def __init__(self):
-        self._config = None
-        self._client = None
-        self.key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
+        pass
 
-    def _load_config(self, settings: Optional[Dict[str, Any]] = None):
-        """Load API key and endpoint from Azure Key Vault with retry logic"""
-        if self._config is None:
-            kv_url = self.key_vault_url
-            api_key = None
-            endpoint = None
-            api_version = None
-            model = None
-            
-            # Retry configuration for credential initialization
-            max_retries = 3
-            retry_delay = 0.5  # Start with 0.5 seconds
-            last_error = None
-            
-            for attempt in range(max_retries):
-                try:
-                    credential = DefaultAzureCredential()
-                    kvclient = SecretClient(vault_url=kv_url, credential=credential)
-                    
-                    # Load API key from Key Vault
-                    try:
-                        api_key = kvclient.get_secret("llm-api-key").value
-                        logger.info(f"API Key loaded from Key Vault (attempt {attempt + 1}/{max_retries})")
-                    except Exception as e:
-                        logger.error(f"Failed to load API key from Key Vault (attempt {attempt + 1}/{max_retries}): {e}")
-                        raise ValueError(f"Failed to load API key from Key Vault: {e}")
-                    
-                    # Load endpoint from Key Vault
-                    try:
-                        endpoint_secret = kvclient.get_secret("llm-base-endpoint")
-                        endpoint = endpoint_secret.value
-                        api_version_secret = kvclient.get_secret("llm-mini-version")
-                        api_version = api_version_secret.value
-                        model_secret = kvclient.get_secret("llm-5")
-                        model = model_secret.value
-                        logger.info("Endpoint loaded from Key Vault")
-                    except Exception as e:
-                        logger.warning(f"Failed to load endpoint from Key Vault: {e}; using default endpoint")
-                        endpoint = "https://stg-secureapi.hexaware.com/api/azureai"
-                    
-                    # If we got here, config loading succeeded
-                    break
-                    
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Failed to load Azure config (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s: {e}")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        logger.error(f"Failed to load Azure config after {max_retries} attempts: {e}")
-                        raise ValueError(f"Failed to load API key from Key Vault after {max_retries} attempts: {e}")
-
-            # Use settings if provided, otherwise use defaults
-            if settings:
-                api_version = settings.get("apiVersion", api_version)
-                model = settings.get("model", model)
-
-            self._config = {
-                "api_key": api_key,
-                "endpoint": endpoint,
+    def _get_client(self) -> AzureOpenAI:
+        """Get Azure OpenAI client instance (initialized at server startup)."""
+        return get_azure_openai_client()
+    
+    def _load_config(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Get cached Azure configuration (loaded at server startup)."""
+        config = get_azure_config()
+        # Apply settings overrides if provided
+        if settings:
+            api_version = settings.get("apiVersion", config.get("api_version"))
+            model = settings.get("model", config.get("deployment"))
+            return {
+                "api_key": config.get("api_key"),
+                "endpoint": config.get("endpoint"),
                 "api_version": api_version,
                 "model": model,
             }
-
-            if self._config.get("api_key"):
-                logger.info(f"API Key loaded, starts with: {self._config['api_key'][:5]}...")
-                logger.info(
-                    f"Azure OpenAI config - Model: {self._config['model']}, Endpoint: {self._config['endpoint']}")
-            else:
-                logger.error("Failed to load API key from Key Vault")
-
-        return self._config
-
-    def _get_client(self):
-        if self._client is None:
-            config = self._load_config()
-            if not config.get("api_key"):
-                raise ValueError(
-                    "Missing required Azure OpenAI config: api_key. "
-                    "Provide this via environment variable AZURE_OPENAI_API_KEY."
-                )
-            # Clean up the endpoint - remove any trailing slashes or /openai paths
-            endpoint = config["endpoint"].strip()
-            if endpoint.endswith("/"):
-                endpoint = endpoint.rstrip("/")
-            # Remove any /openai or /chat paths that might be included
-            if "/openai" in endpoint:
-                endpoint = endpoint.split("/openai")[0]
-            
-            logger.info(f"Initializing AzureOpenAI with endpoint: {endpoint}, api_version: {config.get('api_version')}")
-            
-            self._client = AzureOpenAI(
-                api_key=config["api_key"],
-                api_version=config.get("api_version", "2024-02-15-preview"),
-                azure_endpoint=endpoint
-            )
-        return self._client
+        return {
+            "api_key": config.get("api_key"),
+            "endpoint": config.get("endpoint"),
+            "api_version": config.get("api_version"),
+            "model": config.get("deployment"),
+        }
 
     async def generate_content(
             self,

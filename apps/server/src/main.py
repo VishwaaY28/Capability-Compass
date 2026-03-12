@@ -13,6 +13,7 @@ from tortoise.contrib.fastapi import register_tortoise
 import sqlite3
 from pathlib import Path
 import logging
+from config.azure_clients import initialize_azure_clients
 
 app = FastAPI(
     title="Compass Master API",
@@ -87,6 +88,17 @@ def _ensure_process_capability_column():
             except Exception:
                 pass
 
+
+@app.on_event("startup")
+def _on_startup_initialize_azure_clients():
+    """Initialize all Azure OpenAI clients at server startup"""
+    try:
+        logger.info("Initializing Azure OpenAI clients...")
+        initialize_azure_clients()
+        logger.info("✓ Azure OpenAI clients initialized successfully")
+    except Exception as e:
+        logger.error(f"Startup Azure clients initialization failed: {e}", exc_info=True)
+        raise
 
 @app.on_event("startup")
 def _on_startup_check_db():

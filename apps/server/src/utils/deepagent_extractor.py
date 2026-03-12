@@ -16,10 +16,10 @@ from datetime import datetime
 from deepagents import create_deep_agent
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 from langchain_openai import AzureChatOpenAI
 from langchain_core.callbacks.base import BaseCallbackHandler
+from openai import AzureOpenAI
+from config.azure_clients import get_azure_chat_openai_client, get_azure_embedding_client, get_azure_config
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def save_document_chunks(chunks: List[Dict], filename: str, chunks_dir: str = "d
     Save document chunks to a JSON file in the document chunks folder.
     
     Args:
-        chunks: List of chunk dictionaries with 'text' and 'metadata' keys
+        chunks: List of chunk dictionaries with 'text', 'metadata', and 'embedding' keys
         filename: Base filename for the chunks file (without extension)
         chunks_dir: Directory to save chunks (default: 'document_chunks')
         
@@ -136,13 +136,11 @@ def save_document_chunks(chunks: List[Dict], filename: str, chunks_dir: str = "d
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     candidate = chunks_path / f"{base}_chunks_{ts}.json"
     
-    # Handle file collisions
     counter = 2
     while candidate.exists():
         candidate = chunks_path / f"{base}_chunks_{ts}_{counter}.json"
         counter += 1
     
-    # Prepare chunks data with metadata
     chunks_data = {
         "metadata": {
             "total_chunks": len(chunks),
@@ -227,34 +225,57 @@ REQUIREMENTS:
 
 def _get_azure_llm():
     """
-    Initialize Azure OpenAI LLM with credentials from Key Vault.
+    Get Azure OpenAI LLM instances (pre-initialized at server startup).
     
     Returns:
-        AzureChatOpenAI instance configured for capability extraction
+        Tuple of (AzureChatOpenAI instance, AzureOpenAI embedding instance)
     """
     try:
-        credential = DefaultAzureCredential()
-        key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
-        kv_client = SecretClient(vault_url=key_vault_url, credential=credential)
-
-        api_version = kv_client.get_secret("llm-mini-version").value
-        api_key = kv_client.get_secret("llm-api-key").value
-        endpoint = kv_client.get_secret("llm-base-endpoint").value
-        deployment = kv_client.get_secret("llm-5").value
-
-        llm = AzureChatOpenAI(
-            azure_deployment=deployment,
-            api_version=api_version,
-            azure_endpoint=endpoint,
-            api_key=api_key,
-            streaming=True,
-        )
-        return llm
+        llm = get_azure_chat_openai_client()
+        llm_embedd = get_azure_embedding_client()
+        logger.info("Using pre-initialized Azure LLM clients")
+        return llm, llm_embedd
         
     except Exception as e:
-        logger.error(f"Failed to initialize Azure LLM: {e}")
+        logger.error(f"Failed to retrieve pre-initialized Azure LLM: {e}")
         raise
 
+
+
+def embed_chunks(chunks: List[Dict]) -> List[Dict]:
+    """
+    Embed document chunks using Azure OpenAI embedding service.
+    
+    Args:
+        chunks: List of chunk dictionaries with 'text' and 'metadata' keys
+        
+    Returns:
+        List of chunk dictionaries with 'embedding' added to each
+    """
+    try:
+        _, llm_embedd = _get_azure_llm()
+        
+        texts = [chunk.get("text", "") for chunk in chunks]
+        
+        if not texts:
+            return chunks
+        
+        resp = llm_embedd.embeddings.create(
+            model="text-embedding-ada-002",
+            input=texts
+        )
+        
+        embeddings = [d.embedding for d in resp.data]
+        
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk["embedding"] = embedding
+        
+        logger.info(f"Embedded {len(chunks)} chunks")
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Failed to embed chunks: {e}")
+        raise
 
 def build_extraction_agent(pre_loaded_chunks: List[Dict]):
     """
@@ -266,15 +287,14 @@ def build_extraction_agent(pre_loaded_chunks: List[Dict]):
     Returns:
         Configured DeepAgent instance with tools and system prompt
     """
-    # Create a wrapper function that returns pre-loaded chunks (prevents re-loading)
     def get_cached_chunks(path: str = None) -> List[Dict]:
         """Returns pre-loaded chunks instead of loading from disk"""
         return pre_loaded_chunks
     
-    llm = _get_azure_llm()
+    llm, _ = _get_azure_llm()
     agent = create_deep_agent(
         model=llm,
-        tools=[get_cached_chunks, write_json],  # Use cached chunks getter, not file loader
+        tools=[get_cached_chunks, write_json],
         system_prompt=EXTRACTION_INSTRUCTIONS,
     )
     return agent
@@ -381,7 +401,15 @@ async def extract_capability_model(
             "message": f"Loaded {chunk_count} document chunks"
         }
         
-        # Save chunks to document_chunks folder
+        yield {
+            "status": "loading",
+            "progress": 30,
+            "message": "Embedding chunks..."
+        }
+        
+        chunks = embed_chunks(chunks)
+        logger.info(f"[Extractor] Embedded {chunk_count} chunks")
+        
         source_filename = Path(file_path).stem
         chunks_output_path = save_document_chunks(chunks, source_filename)
         logger.info(f"Chunks saved to: {chunks_output_path}")

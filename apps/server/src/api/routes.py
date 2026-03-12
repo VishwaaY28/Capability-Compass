@@ -2268,6 +2268,7 @@ async def _import_chunks_to_knowledge_base(chunks_path: str) -> tuple[int, List[
         for idx, chunk in enumerate(chunks):
             chunk_text = chunk.get("text", "")
             metadata = chunk.get("metadata", {})
+            embedding = chunk.get("embedding", [])
             
             if not chunk_text.strip():
                 continue
@@ -2282,17 +2283,30 @@ async def _import_chunks_to_knowledge_base(chunks_path: str) -> tuple[int, List[
             # Create unique chunk ID based on source and index
             chunk_id = f"{source}_{idx}_{page}"
             
-            # Create Chunk node with properties
+            # Create Chunk node with properties including embedding
             chunk_var = f"chunk_{idx}"
-            cypher_lines.append(
-                f"MERGE ({chunk_var}:Chunk {{"
-                f"id: '{_esc(chunk_id)}', "
-                f"source: '{_esc(source)}', "
-                f"section: '{_esc(section)}', "
-                f"page: {page}, "
-                f"text: '{_esc(chunk_text_truncated)}'"
-                f"}})"
-            )
+            if embedding:
+                embedding_str = str(embedding).replace("'", '"')
+                cypher_lines.append(
+                    f"MERGE ({chunk_var}:Chunk {{"
+                    f"id: '{_esc(chunk_id)}', "
+                    f"source: '{_esc(source)}', "
+                    f"section: '{_esc(section)}', "
+                    f"page: {page}, "
+                    f"text: '{_esc(chunk_text_truncated)}', "
+                    f"embedding: {embedding_str}"
+                    f"}})"
+                )
+            else:
+                cypher_lines.append(
+                    f"MERGE ({chunk_var}:Chunk {{"
+                    f"id: '{_esc(chunk_id)}', "
+                    f"source: '{_esc(source)}', "
+                    f"section: '{_esc(section)}', "
+                    f"page: {page}, "
+                    f"text: '{_esc(chunk_text_truncated)}'"
+                    f"}})"
+                )
             
             # Create relationship from Knowledge to Chunk
             cypher_lines.append(f"MERGE (k)-[:CONTAINS_CHUNK]->({chunk_var})")

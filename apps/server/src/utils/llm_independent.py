@@ -7,14 +7,11 @@ the LLM's own knowledge, without relying on vertical data from the database.
 """
 
 import logging
-import os
-import time
 from typing import Dict, Any, Tuple
 from env import env
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
 from openai import AzureOpenAI
 from openai import OpenAI
+from config.azure_clients import get_azure_openai_independent_client, get_azure_config
 
 logger = logging.getLogger(__name__)
 
@@ -37,87 +34,25 @@ class AzureOpenAIIndependentClient:
         self._last_system_prompt = None
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load Azure OpenAI API configuration from Key Vault with retry logic"""
+        """Get cached Azure OpenAI configuration (loaded at server startup)"""
         if self._config is None:
-            try:
-                # Retry configuration for credential initialization
-                max_retries = 3
-                retry_delay = 0.5  # Start with 0.5 seconds
-                last_error = None
-                
-                for attempt in range(max_retries):
-                    try:
-                        # Initialize credential and Key Vault client
-                        credential = DefaultAzureCredential()
-                        key_vault_url = "https://fstodevazureopenai.vault.azure.net/"
-                        kv_client = SecretClient(vault_url=key_vault_url, credential=credential)
-                        
-                        # Retrieve secrets from Key Vault
-                        # api_key = kv_client.get_secret("llm-api-key").value
-                        # endpoint = kv_client.get_secret("llm-base-endpoint").value
-                        # deployment = kv_client.get_secret("llm-mini").value
-                        api_version = kv_client.get_secret("llm-mini-version").value
-                        api_key = kv_client.get_secret("llm-api-key").value
-                        endpoint = kv_client.get_secret("llm-base-endpoint").value
-                        deployment = kv_client.get_secret("llm-5").value
-                        # Strip whitespace from all values
-                        api_key = api_key.strip() if api_key else None
-                        endpoint = endpoint.strip() if endpoint else None
-                        deployment = deployment.strip() if deployment else None
-                        api_version = api_version.strip() if api_version else None
-                        
-                        if not all([api_key, endpoint, deployment, api_version]):
-                            logger.warning(f"One or more required Azure secrets are missing (attempt {attempt + 1}/{max_retries})")
-                            logger.warning(f"API Key present: {bool(api_key)}, Endpoint: {bool(endpoint)}, Deployment: {bool(deployment)}, API Version: {bool(api_version)}")
-                            raise ValueError("Missing required Azure Key Vault secrets")
-
-                        self._config = {
-                            "api_key": api_key,
-                            "endpoint": endpoint,
-                            "deployment": deployment,
-                            "api_version": api_version,
-                        }
-                        logger.info(f"Azure OpenAI config loaded - Endpoint: {endpoint}, Deployment: {deployment}, API Version: {api_version}")
-                        break  # Success, exit retry loop
-                        
-                    except Exception as e:
-                        last_error = e
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Failed to load Azure config (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s: {e}")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            logger.error(f"Failed to load Azure config after {max_retries} attempts: {e}")
-                            raise ValueError(f"Failed to load Azure configuration: {e}")
-
-            except Exception as e:
-                logger.error(f"Error loading Azure Key Vault configuration: {e}")
-                raise ValueError(f"Failed to load Azure configuration: {e}")
-
+            self._config = {
+                "api_key": get_azure_config().get("api_key"),
+                "endpoint": get_azure_config().get("endpoint"),
+                "deployment": get_azure_config().get("deployment"),
+                "api_version": get_azure_config().get("api_version"),
+            }
         return self._config
 
     def _get_client(self) -> AzureOpenAI:
-        """Get or create Azure OpenAI client instance"""
+        """Get Azure OpenAI client instance (initialized at server startup)"""
         if self._client is None:
             if not _has_azure:
                 raise ImportError(
                     "Azure libraries are not installed. Install them with: pip install azure-identity azure-keyvault-secrets openai"
                 )
-            config = self._load_config()
-            
-            # Ensure endpoint doesn't have trailing slashes or path
-            endpoint = config["endpoint"]
-            base_url = endpoint.split("/chat/completions")[0]
-            self._client = AzureOpenAI(
-                api_key=config["api_key"],
-                api_version=config["api_version"],
-                azure_endpoint=endpoint
-            )
-            # self._client = OpenAI(
-            #     api_key=config["api_key"],
-            #     base_url=base_url
-            # )
-            logger.info(f"Azure OpenAI client initialized successfully with endpoint: {endpoint}")
+            self._client = get_azure_openai_independent_client()
+            logger.info(f"Using pre-initialized Azure OpenAI client")
 
         return self._client
 
