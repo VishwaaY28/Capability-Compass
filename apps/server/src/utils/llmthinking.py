@@ -249,18 +249,15 @@ class AzureOpenAIThinkingClient:
         return self._vmo_meta_store.get(request_id, {})
 
     def _default_db_fetch(self, cypher: str) -> Any:
-
-        endpoint = "http://localhost:5000/execute-cypher"
-        if requests is None:
-            raise RuntimeError("requests library is not available to perform default DB fetch")
-
+        """Execute a Cypher query directly via Neo4jQueryService (no HTTP hop)."""
         try:
-            resp = requests.post(endpoint, json={"query": cypher}, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            return data
+            from neo4j_graph.services.query_execution_service import Neo4jQueryService
+            svc = Neo4jQueryService()
+            result = svc.execute_cypher(cypher)
+            svc.close()
+            return result
         except Exception as e:
-            logger.warning(f"Default DB fetch to {endpoint} failed: {e}")
+            logger.warning(f"Default DB fetch via Neo4jQueryService failed: {e}")
             return []
 
     def _get_neo4j_driver(self):
@@ -274,7 +271,7 @@ class AzureOpenAIThinkingClient:
         
         try:
             neo4j_uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687").strip()
-            neo4j_user = os.getenv("NEO4J_USER", "neo4j").strip()
+            neo4j_user = os.getenv("NEO4J_USERNAME", "neo4j").strip()
             neo4j_password = os.getenv("NEO4J_PASSWORD", "12345678").strip()
             
             if not neo4j_uri or not neo4j_user or not neo4j_password:

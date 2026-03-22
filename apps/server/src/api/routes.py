@@ -2583,23 +2583,17 @@ async def import_extracted_model_to_graph(payload: CapabilityImportRequest):
             cypher_lines.extend(chunks_cypher)
             logger.info(f"Added {chunks_imported} chunks to import")
         
-        # After local DB insertions, attempt to sync to Neo4j cloud via the API
-        try:
-            import requests
-
-            cypher_query = "\n".join(cypher_lines)
-            # POST to Neo4J API (separate service)
+        # After local DB insertions, attempt to sync to Neo4j directly
+        if cypher_lines:
             try:
-                r = requests.post("http://localhost:5000/execute-cypher", json={"query": cypher_query}, timeout=30)
-                if r.status_code == 200:
-                    logger.info("Synced imported model to Neo4j cloud successfully")
-                else:
-                    logger.warning(f"Neo4j sync returned status {r.status_code}: {r.text}")
+                from neo4j_graph.services.query_execution_service import Neo4jQueryService
+                cypher_query = "\n".join(cypher_lines)
+                svc = Neo4jQueryService()
+                svc.execute_cypher(cypher_query)
+                svc.close()
+                logger.info("Synced imported model to Neo4j successfully")
             except Exception as e:
-                logger.warning(f"Failed to call Neo4j API to execute cypher: {e}")
-        except Exception:
-            # Avoid failing the import if sync machinery has issues
-            logger.exception("Unexpected error while preparing Neo4j sync")
+                logger.warning(f"Failed to sync to Neo4j: {e}")
 
         return JSONResponse({
             "status": "success",
