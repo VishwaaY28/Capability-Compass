@@ -17,7 +17,7 @@ const Sidebar: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [llmSettings, setLlmSettings] = useState<LLMSettings>({
     provider: 'azure',
-    vaultName: 'https://kvcapabilitycompass.vault.azure.net/',
+    vaultName: 'https://fstodevazureopenai.vault.azure.net/',
     temperature: 0.2,
     topP: 0.9,
   });

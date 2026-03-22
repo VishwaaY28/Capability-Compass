@@ -23,6 +23,12 @@ from config.azure_clients import get_azure_chat_openai_client, get_azure_embeddi
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for Azure LLM clients to avoid repeated initialization
+_azure_llm_cache = {
+    "llm": None,
+    "embedder": None
+}
+
 
 class StreamingCallbackHandler(BaseCallbackHandler):
     """
@@ -225,19 +231,31 @@ REQUIREMENTS:
 
 def _get_azure_llm():
     """
-    Get Azure OpenAI LLM instances (pre-initialized at server startup).
+    Get Azure OpenAI LLM instances with caching to avoid repeated initialization.
     
     Returns:
         Tuple of (AzureChatOpenAI instance, AzureOpenAI embedding instance)
     """
+    global _azure_llm_cache
+    
+    # Return cached instances if available
+    if _azure_llm_cache["llm"] is not None and _azure_llm_cache["embedder"] is not None:
+        logger.debug("Using cached Azure LLM clients")
+        return _azure_llm_cache["llm"], _azure_llm_cache["embedder"]
+    
     try:
         llm = get_azure_chat_openai_client()
         llm_embedd = get_azure_embedding_client()
-        logger.info("Using pre-initialized Azure LLM clients")
+        
+        # Cache for future use
+        _azure_llm_cache["llm"] = llm
+        _azure_llm_cache["embedder"] = llm_embedd
+        
+        logger.info("Initialized and cached Azure LLM clients")
         return llm, llm_embedd
         
     except Exception as e:
-        logger.error(f"Failed to retrieve pre-initialized Azure LLM: {e}")
+        logger.error(f"Failed to retrieve Azure LLM: {e}")
         raise
 
 
@@ -245,6 +263,9 @@ def _get_azure_llm():
 def embed_chunks(chunks: List[Dict]) -> List[Dict]:
     """
     Embed document chunks using Azure OpenAI embedding service.
+    
+    NOTE: Only embed if embeddings are actually needed for downstream processing.
+    If chunks are only sent to LLM, this step can be skipped to improve performance.
     
     Args:
         chunks: List of chunk dictionaries with 'text' and 'metadata' keys
@@ -276,6 +297,20 @@ def embed_chunks(chunks: List[Dict]) -> List[Dict]:
     except Exception as e:
         logger.error(f"Failed to embed chunks: {e}")
         raise
+
+
+def skip_embedding_chunks(chunks: List[Dict]) -> List[Dict]:
+    """
+    Skip embedding chunks to improve performance when embeddings are not needed.
+    
+    Args:
+        chunks: List of chunk dictionaries
+        
+    Returns:
+        Same chunks list (unmodified)
+    """
+    logger.info(f"Skipped embedding {len(chunks)} chunks - not required for LLM extraction")
+    return chunks
 
 def build_extraction_agent(pre_loaded_chunks: List[Dict]):
     """
@@ -343,7 +378,8 @@ async def extract_capability_model(
     output_dir: Optional[str] = None,
     vertical: Optional[str] = None,
     subvertical: Optional[str] = None,
-    extraction_depth: str = "data_element"
+    extraction_depth: str = "data_element",
+    skip_embeddings: bool = True
 ) -> AsyncGenerator[Dict, None]:
     """
     Extract capability model from a document using DeepAgent.
@@ -357,6 +393,7 @@ async def extract_capability_model(
         vertical: Manual vertical name override (optional, uses LLM value if not provided)
         subvertical: Manual subvertical name override (optional, uses LLM value if not provided)
         extraction_depth: Level to extract to - "capability", "process", "subprocess", "data_entity", "data_element"
+        skip_embeddings: Whether to skip embedding chunks (default True for performance)
         
     Yields:
         Dictionary events with status and data:
@@ -404,11 +441,16 @@ async def extract_capability_model(
         yield {
             "status": "loading",
             "progress": 30,
-            "message": "Embedding chunks..."
+            "message": "Processing document chunks..."
         }
         
-        chunks = embed_chunks(chunks)
-        logger.info(f"[Extractor] Embedded {chunk_count} chunks")
+        # Skip expensive embedding step if not needed for extraction
+        if skip_embeddings:
+            chunks = skip_embedding_chunks(chunks)
+        else:
+            chunks = embed_chunks(chunks)
+        
+        logger.info(f"[Extractor] Processed {chunk_count} chunks (embeddings={'skipped' if skip_embeddings else 'enabled'})")
         
         source_filename = Path(file_path).stem
         chunks_output_path = save_document_chunks(chunks, source_filename)
@@ -467,12 +509,16 @@ async def extract_capability_model(
         logger.info(f"[Extractor] Agent task:\n{task}")
         logger.info(f"[Extractor] Configuration - vertical: {repr(vertical)}, subvertical: {repr(subvertical)}, depth: {repr(extraction_depth)}")
         
-        # Step 4: Run agent ONCE with pre-loaded context
-        def run_agent():
-            return agent.invoke({"messages": [{"role": "user", "content": task}]})
-        
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, run_agent)
+        # Step 4: Run agent synchronously (agent.invoke is already blocking)
+        try:
+            result = agent.invoke({"messages": [{"role": "user", "content": task}]})
+        except Exception as e:
+            logger.error(f"[Extractor] Agent execution failed: {e}", exc_info=True)
+            yield {
+                "status": "error",
+                "error": f"Agent execution failed: {str(e)}"
+            }
+            return
         
         logger.info(f"[Extractor] Agent execution completed")
         

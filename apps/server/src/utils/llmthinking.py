@@ -589,7 +589,7 @@ class AzureOpenAIThinkingClient:
         try:
             client = self._get_client()
             config = self._load_config()
-            plan = self._create_query_plan(query, user_profile)
+            plan = self._create_query_plan(query, user_profile, vertical)  # Pass vertical to plan
 
             # 2) Generate cypher using plan (VMO-driven flow only)
             cypher = self._generate_enterprise_query(plan)
@@ -750,7 +750,7 @@ class AzureOpenAIThinkingClient:
             config = self._load_config()
 
             # VMO flow: create QueryPlan-like dict, generate cypher and fetch via default endpoint if possible
-            plan = self._create_query_plan(query, None)
+            plan = self._create_query_plan(query, None, vertical)  # Pass vertical to plan
 
             cypher = self._generate_enterprise_query(plan)
             # Prefer the default endpoint fetcher as primary. If it returns nothing,
@@ -1064,7 +1064,7 @@ Provide both your thinking process and final analysis."""
 
         return resolved_list
 
-    def _create_query_plan(self, user_query: str, user_profile: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+    def _create_query_plan(self, user_query: str, user_profile: Optional[Dict[str, str]] = None, vertical: Optional[str] = None) -> Optional[Dict[str, Any]]:
         anchors = self._extract_all_anchors(user_query)
         # allow empty anchors list — proceed with an empty plan rather than falling back to legacy behavior
         if not anchors:
@@ -1095,11 +1095,13 @@ Provide both your thinking process and final analysis."""
             "persona_tone": persona,
             "depth_scope": depth,
             "is_comparison": is_comp,
+            "vertical": vertical,  # Include vertical filter in plan
         }
 
     def _generate_enterprise_query(self, plan: Dict[str, Any]) -> str:
         queries: List[str] = []
         depth = plan.get("depth_scope") or 2
+        vertical = plan.get("vertical")  # Get vertical filter from plan
 
         for anchor in plan.get("primary_anchors", []):
             intent = plan.get("intent")
@@ -1156,7 +1158,16 @@ Provide both your thinking process and final analysis."""
             else:
                 rel_section = f"*1..{depth}"
 
-            q = f'''MATCH (root {{name: '{safe_anchor}'}}) OPTIONAL MATCH path = (root)-[{rel_section}]-(related) WITH root, collect(DISTINCT related) as related_nodes, collect(DISTINCT path) as paths UNWIND paths as p UNWIND relationships(p) as rel WITH root, related_nodes, collect(DISTINCT {{ type: type(rel), from_node: startNode(rel).name, to_node: endNode(rel).name }}) as rels RETURN root, labels(root) as root_labels, related_nodes, rels as relationships'''
+            # Build WHERE clause to filter by vertical if provided
+            where_clause = ""
+            if vertical:
+                safe_vertical = vertical.replace("'", "''")
+                where_clause = f" WHERE root.vertical = '{safe_vertical}' OR any(node IN [root] + related_nodes WHERE node.vertical = '{safe_vertical}')"
+                logger.debug(f"[VERTICAL FILTER] Applied vertical filter for: {vertical}")
+            else:
+                logger.debug(f"[VERTICAL FILTER] No vertical filter applied - querying all verticals")
+
+            q = f'''MATCH (root {{name: '{safe_anchor}'}}) OPTIONAL MATCH path = (root)-[{rel_section}]-(related) WITH root, collect(DISTINCT related) as related_nodes, collect(DISTINCT path) as paths UNWIND paths as p UNWIND relationships(p) as rel WITH root, related_nodes, collect(DISTINCT {{ type: type(rel), from_node: startNode(rel).name, to_node: endNode(rel).name }}) as rels{where_clause} RETURN root, labels(root) as root_labels, related_nodes, rels as relationships'''
             queries.append(q)
 
         return " UNION ".join(queries)
