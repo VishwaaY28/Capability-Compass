@@ -1,55 +1,283 @@
-import React from 'react';
-import { Toaster } from 'react-hot-toast';
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import type NVL from '@neo4j-nvl/base'
+import type { Node, Relationship, HitTargets } from '@neo4j-nvl/base'
+import { InteractiveNvlWrapper } from '@neo4j-nvl/react'
+import type { MouseEventCallbacks } from '@neo4j-nvl/react'
+import EntitySelector from '../components/visualizer/EntitySelector'
+import ControlPanel from '../components/visualizer/ControlPanel'
+import NodeDetails from '../components/visualizer/NodeDetails'
+import { transformApiResponseToNvl } from '../components/visualizer/utils/transformer'
+import type { TraversalNode, TraversalRelationship } from '../components/visualizer/utils/transformer'
+import type { EntityType, EntityListItem, Direction, ApiResponse } from '../components/visualizer/types'
+import '../components/visualizer/visualizer.css'
 
-const EXTERNAL_URL = 'http://localhost:3000/';
+const API_BASE = '/api'
+const ANIMATION_DELAY = 300
+const PATH_HIGHLIGHT_COLOR = '#1976D2'
+const PATH_STROKE_WIDTH = 3
+const NORMAL_STROKE_WIDTH = 1.5
+const MIN_ZOOM = 0.5
+const MAX_ZOOM = 3.0
+const ZOOM_STEP = 0.25
+const DEFAULT_ZOOM = 1.0
 
 const CompassVisualizer: React.FC = () => {
+  const nvlRef = useRef<NVL | null>(null)
+  const [entityType, setEntityType] = useState<EntityType>('Capability')
+  const [entities, setEntities] = useState<EntityListItem[]>([])
+  const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null)
+  const [depth, setDepth] = useState(1)
+  const [direction, setDirection] = useState<Direction>('outgoing')
+  const [allNodes, setAllNodes] = useState<TraversalNode[]>([])
+  const [allRels, setAllRels] = useState<TraversalRelationship[]>([])
+  const [visibleNodes, setVisibleNodes] = useState<Node[]>([])
+  const [visibleRels, setVisibleRels] = useState<Relationship[]>([])
+  const [totalLoadedNodes, setTotalLoadedNodes] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [animating, setAnimating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedNode, setSelectedNode] = useState<{ id: string; label: string; properties: Record<string, unknown>; path?: Array<{ name: string; type: string }> } | null>(null)
+  const [parentMap, setParentMap] = useState<Map<string, string>>(new Map())
+  const [currentZoom, setCurrentZoom] = useState(DEFAULT_ZOOM)
+  const animationRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => { fetchEntities() }, [entityType])
+  useEffect(() => { if (selectedEntityId !== null) fetchSubtree() }, [selectedEntityId, depth, direction])
+  useEffect(() => () => { if (animationRef.current) clearTimeout(animationRef.current) }, [])
+
+  const animateTraversal = useCallback((nodes: TraversalNode[], rels: TraversalRelationship[]) => {
+    if (animationRef.current) clearTimeout(animationRef.current)
+    setVisibleNodes([])
+    setVisibleRels([])
+    setAnimating(true)
+
+    const sortedNodes = [...nodes].sort((a, b) => a.traversalOrder - b.traversalOrder)
+    const sortedRels = [...rels].sort((a, b) => a.traversalOrder - b.traversalOrder)
+    let nodeIndex = 0, relIndex = 0
+
+    const animate = () => {
+      if (nodeIndex < sortedNodes.length) {
+        const currentNode = sortedNodes[nodeIndex]
+        setVisibleNodes(prev => [...prev, { id: currentNode.id, captions: currentNode.captions, color: currentNode.color, size: currentNode.size, x: currentNode.x, y: currentNode.y }])
+        while (relIndex < sortedRels.length) {
+          const rel = sortedRels[relIndex]
+          const targetOrder = sortedNodes.find(n => n.id === rel.to)?.traversalOrder ?? Infinity
+          if (targetOrder <= currentNode.traversalOrder) {
+            setVisibleRels(prev => [...prev, { id: rel.id, from: rel.from, to: rel.to, captions: rel.captions, color: '#000000' }])
+            relIndex++
+          } else break
+        }
+        nodeIndex++
+        animationRef.current = setTimeout(animate, ANIMATION_DELAY)
+      } else {
+        while (relIndex < sortedRels.length) {
+          const rel = sortedRels[relIndex]
+          setVisibleRels(prev => [...prev, { id: rel.id, from: rel.from, to: rel.to, captions: rel.captions, color: '#000000' }])
+          relIndex++
+        }
+        setAnimating(false)
+        setTimeout(() => { if (nvlRef.current && nodes.length > 0) nvlRef.current.fit(nodes.map(n => n.id)) }, 200)
+      }
+    }
+    animate()
+  }, [])
+
+  async function fetchEntities() {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_BASE}/subtree/${entityType}/all`)
+      if (!res.ok) throw new Error('Failed to fetch entities')
+      setEntities(await res.json())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function fetchSubtree() {
+    if (selectedEntityId === null) return
+    setLoading(true)
+    setError(null)
+    try {
+      const depthParam = depth > 0 ? `&depth=${depth}` : ''
+      const res = await fetch(`${API_BASE}/subtree/${entityType}/id/${selectedEntityId}?direction=${direction}${depthParam}`)
+      if (!res.ok) throw new Error('Failed to fetch subtree')
+      const data: ApiResponse = await res.json()
+      const { nodes: nvlNodes, rels: nvlRels, parentMap: newParentMap } = transformApiResponseToNvl(data)
+      setAllNodes(nvlNodes)
+      setAllRels(nvlRels)
+      setTotalLoadedNodes(nvlNodes.length)
+      setParentMap(newParentMap)
+      animateTraversal(nvlNodes, nvlRels)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const computePathToRoot = useCallback((nodeId: string) => {
+    const pathNodes = new Set<string>()
+    const pathEdges = new Set<string>()
+    const pathDetails: Array<{ name: string; type: string }> = []
+    let currentId: string | undefined = nodeId
+    while (currentId) {
+      pathNodes.add(currentId)
+      const currentNode = allNodes.find(n => n.id === currentId)
+      if (currentNode) pathDetails.push({ name: currentNode.captions?.[0]?.value || 'Unknown', type: currentNode.label || 'Node' })
+      const parentId = parentMap.get(currentId)
+      if (parentId) {
+        const edge = allRels.find(r => (r.from === parentId && r.to === currentId) || (r.from === currentId && r.to === parentId))
+        if (edge) pathEdges.add(edge.id)
+      }
+      currentId = parentId
+    }
+    return { pathNodes, pathEdges, pathDetails }
+  }, [parentMap, allRels, allNodes])
+
+  const clearPathHighlight = useCallback(() => {
+    setVisibleRels(prev => prev.map(rel => ({ ...rel, color: '#000000', width: NORMAL_STROKE_WIDTH })))
+  }, [])
+
+  const highlightPathToNode = useCallback((nodeId: string) => {
+    const { pathEdges, pathDetails } = computePathToRoot(nodeId)
+    setVisibleRels(prev => prev.map(rel => ({
+      ...rel,
+      color: pathEdges.has(rel.id) ? PATH_HIGHLIGHT_COLOR : '#000000',
+      width: pathEdges.has(rel.id) ? PATH_STROKE_WIDTH : NORMAL_STROKE_WIDTH,
+    })))
+    return pathDetails
+  }, [computePathToRoot])
+
+  const skipAnimation = () => {
+    if (animationRef.current) clearTimeout(animationRef.current)
+    setVisibleNodes(allNodes.map(n => ({ id: n.id, captions: n.captions, color: n.color, size: n.size, x: n.x, y: n.y })))
+    setVisibleRels(allRels.map(r => ({ id: r.id, from: r.from, to: r.to, captions: r.captions, color: '#000000' })))
+    setAnimating(false)
+    setTimeout(() => { if (nvlRef.current && allNodes.length > 0) nvlRef.current.fit(allNodes.map(n => n.id)) }, 200)
+  }
+
+  const zoomIn = useCallback(() => {
+    if (nvlRef.current && currentZoom < MAX_ZOOM) { const z = Math.min(currentZoom + ZOOM_STEP, MAX_ZOOM); nvlRef.current.setZoom(z); setCurrentZoom(z) }
+  }, [currentZoom])
+
+  const zoomOut = useCallback(() => {
+    if (nvlRef.current && currentZoom > MIN_ZOOM) { const z = Math.max(currentZoom - ZOOM_STEP, MIN_ZOOM); nvlRef.current.setZoom(z); setCurrentZoom(z) }
+  }, [currentZoom])
+
+  const resetZoom = useCallback(() => { if (nvlRef.current) { nvlRef.current.setZoom(DEFAULT_ZOOM); setCurrentZoom(DEFAULT_ZOOM) } }, [])
+
+  const fitToView = useCallback(() => {
+    if (nvlRef.current && visibleNodes.length > 0) {
+      nvlRef.current.fit(visibleNodes.map(n => n.id))
+      setTimeout(() => { if (nvlRef.current) setCurrentZoom(Math.max(MIN_ZOOM, Math.min(nvlRef.current.getScale(), MAX_ZOOM))) }, 100)
+    }
+  }, [visibleNodes])
+
+  const handleNodeClick = (node: Node, _hitTargets: HitTargets, originalEvent: MouseEvent) => {
+    originalEvent.stopPropagation()
+    const fullNode = allNodes.find(n => n.id === node.id)
+    const pathDetails = highlightPathToNode(node.id)
+    setSelectedNode({
+      id: node.id,
+      label: fullNode?.label || node.captions?.[0]?.value || 'Node',
+      properties: fullNode?.properties || {},
+      path: pathDetails,
+    })
+  }
+
+  const mouseEventCallbacks: MouseEventCallbacks = {
+    onHover: () => {},
+    onNodeClick: handleNodeClick,
+    onNodeDoubleClick: () => {},
+    onRelationshipClick: () => {},
+    onDrag: () => {},
+    onPan: () => {},
+    onZoom: (zoomLevel: number) => setCurrentZoom(Math.max(MIN_ZOOM, Math.min(zoomLevel, MAX_ZOOM))),
+    onCanvasClick: () => clearPathHighlight(),
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3000,
-          style: {
-            background: '#363636',
-            color: '#fff',
-          },
-        }}
-      />
-
-      {/*<header className="border-b sticky top-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-50">
-        <div className="container px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div>
-              <h1 className="text-xl font-semibold">Visualizer</h1>
-              <p className="text-xs text-muted-foreground">
-              Capability Insights Through Node-Based Visualization.
-              </p>
-            </div>
+    <div className="viz-app">
+        <header className="border-b sticky top-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-50">
+          <div className="container px-6 py-4">
+              <div className="flex items-center gap-3">
+           {/* <img src={favicon} width={40} height={40} alt="favicon" /> */}
+                <div>
+                    <h1 className="text-xl font-semibold">Visualizer</h1>
+                    <p className="text-xs text-muted-foreground">
+                        View your data in a Graphical way.
+                    </p>
+                </div>
+              </div>
           </div>
-        </div>
-      </header> */}
+      </header>
+      <div className="app-controls">
+        <EntitySelector
+          entityType={entityType}
+          setEntityType={setEntityType}
+          entities={entities}
+          selectedEntityId={selectedEntityId}
+          setSelectedEntityId={setSelectedEntityId}
+          loading={loading}
+        />
+        <ControlPanel depth={depth} setDepth={setDepth} direction={direction} setDirection={setDirection} />
+        {animating && <button className="skip-animation-btn" onClick={skipAnimation}>Skip Animation</button>}
+      </div>
 
-      <div className="mx-auto h-[calc(100vh)]">
-        <div className="w-full h-full rounded overflow-hidden border border-gray-200">
-          {/*
-            Use an iframe to render the external visualizer. We set width/height to fill
-            the available area and remove borders. The `sandbox` attribute is intentionally
-            omitted so the page can function normally; if you need restrictions, add
-            sandbox attributes later.
-          */}
-          <iframe
-            title="Compass Visualizer"
-            src={EXTERNAL_URL}
-            className="w-full h-full"
-            style={{ border: '0' }}
-            // allowFullScreen enables fullscreen if the remote app requests it
-            allowFullScreen
-          />
+      {error && <div className="error-message">{error}</div>}
+
+      <div className="app-main">
+        {totalLoadedNodes > 0 && (
+          <div className="node-counter">
+            <span className="counter-label">Number of Nodes:</span>
+            <span className="counter-value">{totalLoadedNodes}</span>
+          </div>
+        )}
+        <div className="zoom-controls">
+          <button className="zoom-btn" onClick={zoomIn} disabled={currentZoom >= MAX_ZOOM || visibleNodes.length === 0} aria-label="Zoom In">+</button>
+          <button className="zoom-btn" onClick={zoomOut} disabled={currentZoom <= MIN_ZOOM || visibleNodes.length === 0} aria-label="Zoom Out">−</button>
+          <button className="zoom-btn zoom-btn-text" onClick={resetZoom} disabled={visibleNodes.length === 0} aria-label="Reset Zoom">Reset</button>
+          <button className="zoom-btn zoom-btn-text" onClick={fitToView} disabled={visibleNodes.length === 0} aria-label="Fit to View">Fit</button>
+          <span className="zoom-level">{Math.round(currentZoom * 100)}%</span>
         </div>
+
+        <div className="graph-container" onClick={(e) => { if (e.target === e.currentTarget) clearPathHighlight() }}>
+          {loading && <div className="loading-overlay"><div className="spinner"></div></div>}
+          {animating && <div className="animation-indicator">Traversing path... ({visibleNodes.length}/{allNodes.length} nodes)</div>}
+          {visibleNodes.length > 0 ? (
+            <div className="graph-wrapper">
+              <InteractiveNvlWrapper
+                ref={nvlRef}
+                style={{ borderRadius: 10, border: '2px solid #D5D6D8', height: '100%', width: '100%', minHeight: '600px', minWidth: '800px', background: '#ffffff' }}
+                nodes={visibleNodes}
+                rels={visibleRels}
+                mouseEventCallbacks={mouseEventCallbacks}
+                layout="forceDirected"
+                nvlOptions={{ initialZoom: 1, relationshipThreshold: 0, minZoom: 0.1, maxZoom: 10 }}
+              />
+            </div>
+          ) : (
+            !loading && selectedEntityId === null && (
+              <div className="empty-state"><p>Select an entity type and item to visualize its graph</p></div>
+            )
+          )}
+        </div>
+
+        <NodeDetails selectedNode={selectedNode} onClose={() => setSelectedNode(null)} />
+      </div>
+
+      <div className="legend">
+        <span className="legend-item"><span className="dot capability"></span>Capability</span>
+        <span className="legend-item"><span className="dot process"></span>Process</span>
+        <span className="legend-item"><span className="dot subprocess"></span>Subprocess</span>
+        <span className="legend-item"><span className="dot dataentity"></span>Data Entity</span>
+        <span className="legend-item"><span className="dot dataelement"></span>Data Element</span>
       </div>
     </div>
-  );
-};
+  )
+}
 
-export default CompassVisualizer;
+export default CompassVisualizer

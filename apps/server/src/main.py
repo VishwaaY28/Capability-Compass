@@ -14,6 +14,9 @@ import sqlite3
 from pathlib import Path
 import logging
 from config.azure_clients import initialize_azure_clients
+from neo4j_graph.routes.subtree_routes import router as neo4j_subtree_router
+from neo4j_graph.routes.capability_routes import router as neo4j_capability_router
+from neo4j_graph.routes.query_routes import router as neo4j_query_router
 
 app = FastAPI(
     title="Compass Master API",
@@ -28,6 +31,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router, prefix="/api")
+app.include_router(neo4j_subtree_router, prefix="/api")
+app.include_router(neo4j_capability_router, prefix="/api")
+app.include_router(neo4j_query_router, prefix="/api")
 
 
 register_tortoise(
@@ -100,6 +106,19 @@ def _on_startup_initialize_azure_clients():
         logger.error(f"Startup Azure clients initialization failed: {e}", exc_info=True)
         raise
 
+@app.on_event("startup")
+def _on_startup_configure_neo4j():
+    """Configure neomodel connection to Neo4j"""
+    try:
+        from neomodel import config as neomodel_config
+        neo4j_url = os.getenv("NEO4J_DATABASE_URL1")
+        if neo4j_url:
+            neomodel_config.DATABASE_URL = neo4j_url
+            logger.info("✓ Neo4j neomodel configured successfully")
+        else:
+            logger.warning("NEO4J_DATABASE_URL1 not set — Neo4j routes will not function")
+    except Exception as e:
+        logger.warning(f"Neo4j configuration failed: {e}")
 @app.on_event("startup")
 def _on_startup_check_db():
     # run sync DB compatibility check

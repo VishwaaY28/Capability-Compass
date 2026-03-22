@@ -12,6 +12,9 @@
   },
   "dependencies": {
     "@dqbd/tiktoken": "^1.0.22",
+    "@neo4j-nvl/base": "^1.1.0",
+    "@neo4j-nvl/interaction-handlers": "^1.1.0",
+    "@neo4j-nvl/react": "^1.1.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-slot": "^1.2.4",
     "axios": "^1.12.2",
