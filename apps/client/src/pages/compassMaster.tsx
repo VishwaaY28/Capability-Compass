@@ -274,30 +274,52 @@ export default function Home() {
   }
 
   async function handleExportCapability() {
-    if (!selectedExportCapId) {
-      toast.error('Select a capability to export');
+    if (selectedExportCapIds.size === 0) {
+      toast.error('Select at least one capability to export');
       return;
     }
     try {
       setIsExporting(true);
-      const res = await fetch(`/api/export/capability/${selectedExportCapId}/csv`);
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || 'Export failed');
+      const ids = Array.from(selectedExportCapIds);
+
+      if (ids.length === 1) {
+        // Single export - download directly
+        const res = await fetch(`/api/export/capability/${ids[0]}/csv`);
+        if (!res.ok) throw new Error((await res.text()) || 'Export failed');
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const cap = capabilities.find((c) => c.id === ids[0]);
+        a.href = url;
+        a.download = cap ? `${cap.name.replace(/\s+/g, '_')}_export.csv` : `capability_${ids[0]}_export.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+      } else {
+        // Multi export - download each file sequentially
+        for (const id of ids) {
+          const res = await fetch(`/api/export/capability/${id}/csv`);
+          if (!res.ok) {
+            toast.error(`Failed to export capability ${id}`);
+            continue;
+          }
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          const cap = capabilities.find((c) => c.id === id);
+          a.href = url;
+          a.download = cap ? `${cap.name.replace(/\s+/g, '_')}_export.csv` : `capability_${id}_export.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.URL.revokeObjectURL(url);
+        }
       }
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const cap = capabilities.find((c) => c.id === selectedExportCapId);
-      const name = cap ? `${cap.name.replace(/\s+/g, '_')}_export.csv` : `capability_${selectedExportCapId}_export.csv`;
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-      toast.success('CSV downloaded');
+
+      toast.success(`${ids.length} CSV file${ids.length > 1 ? 's' : ''} downloaded`);
       setIsExportModalOpen(false);
+      setSelectedExportCapIds(new Set());
     } catch (e) {
       console.error(e);
       toast.error('Failed to export CSV');
@@ -336,7 +358,7 @@ export default function Home() {
 
   // CSV export modal state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [selectedExportCapId, setSelectedExportCapId] = useState<number | null>(null);
+  const [selectedExportCapIds, setSelectedExportCapIds] = useState<Set<number>>(new Set());
   const [isExporting, setIsExporting] = useState(false);
 
   const processLevelOptions = [
@@ -1125,14 +1147,147 @@ export default function Home() {
         </div>
       </div>
 
-      {isModalOpen && (
+      {isModalOpen && modalMode === 'view' && currentCap && (
+        <div className="fixed inset-0 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsModalOpen(false)} />
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl z-50 max-h-[85vh] flex flex-col">
+            {/* Header */}
+            <div className="border-b border-gray-100 px-6 py-4 bg-gray-50 flex items-start justify-between flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <FiEye className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900">{currentCap.name}</h2>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 mt-1">
+                    {currentCap.subvertical ?? 'Unassigned'}
+                  </span>
+                </div>
+              </div>
+              <button
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-md"
+                onClick={() => setIsModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+              {/* Description */}
+              {currentCap.description && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-1">Description</p>
+                  <p className="text-sm text-gray-700">{currentCap.description}</p>
+                </div>
+              )}
+
+              {/* Processes */}
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-3 flex items-center gap-2">
+                  <FiLayers className="w-3.5 h-3.5" />
+                  Processes ({currentCap.processes.length})
+                </p>
+                {currentCap.processes.length === 0 ? (
+                  <p className="text-sm text-gray-400 italic">No processes defined.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {currentCap.processes.map((p, idx) => {
+                      const subprocesses = Array.isArray(p.subprocesses) ? p.subprocesses : [];
+                      return (
+                        <div key={p.id ?? idx} className="border border-gray-200 rounded-xl overflow-hidden">
+                          {/* Process row */}
+                          <div className="px-4 py-3 bg-white">
+                            <div className="flex items-start gap-3">
+                              <div className="w-2 h-2 rounded-full bg-indigo-500 flex-shrink-0 mt-1.5" />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-semibold text-gray-900 text-sm">{p.name}</span>
+                                  {p.level && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
+                                      {p.level}
+                                    </span>
+                                  )}
+                                  {p.category && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                                      {p.category}
+                                    </span>
+                                  )}
+                                </div>
+                                {p.description && (
+                                  <p className="text-xs text-gray-500 mt-1">{p.description}</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Subprocesses */}
+                          {subprocesses.length > 0 && (
+                            <div className="border-t border-gray-100 bg-indigo-50 divide-y divide-indigo-100">
+                              {subprocesses.map((sub: any, subIdx: number) => (
+                                <div key={sub.id ?? subIdx} className="px-4 py-2.5 ml-5">
+                                  <div className="flex items-start gap-2">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-teal-500 flex-shrink-0 mt-1.5" />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-medium text-gray-800 text-xs">{sub.name}</span>
+                                        {sub.category && (
+                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700">
+                                            {sub.category}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {sub.description && (
+                                        <p className="text-xs text-gray-500 mt-0.5">{sub.description}</p>
+                                      )}
+                                      {/* Data entities */}
+                                      {Array.isArray(sub.data_entities) && sub.data_entities.length > 0 && (
+                                        <div className="mt-2 space-y-1">
+                                          {sub.data_entities.map((de: any, deIdx: number) => (
+                                            <div key={deIdx} className="text-xs">
+                                              <span className="font-medium text-gray-600">{de.data_entity_name}</span>
+                                              {Array.isArray(de.data_elements) && de.data_elements.length > 0 && (
+                                                <span className="text-gray-400 ml-1">
+                                                  — {de.data_elements.map((el: any) => el.data_element_name).join(', ')}
+                                                </span>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end px-6 py-4 border-t border-gray-100 bg-gray-50 flex-shrink-0">
+              <button
+                className="px-4 py-1.5 rounded-md text-gray-600 hover:bg-gray-100 font-medium"
+                onClick={() => setIsModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isModalOpen && modalMode !== 'view' && (
         <div className="fixed inset-0 flex items-center justify-center z-50">
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsModalOpen(false)} />
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md z-50 overflow-hidden">
             <div className="border-b border-gray-100 px-6 py-3 bg-gray-50 flex items-center gap-3">
               <FiEdit3 className="w-5 h-5 text-blue-600" />
               <h2 className="text-lg font-bold text-gray-900">
-                {modalMode === 'view' ? 'View capability' : modalMode === 'edit' ? 'Edit capability' : 'Add Capability'}
+                {modalMode === 'edit' ? 'Edit capability' : 'Add Capability'}
               </h2>
             </div>
 
@@ -1143,7 +1298,6 @@ export default function Home() {
                 placeholder="Enter capability name..."
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                disabled={modalMode === 'view'}
               />
 
               <label className="block text-sm font-medium text-gray-700 mb-2 mt-4">Description</label>
@@ -1153,7 +1307,6 @@ export default function Home() {
                 rows={4}
                 value={formDescription}
                 onChange={(e) => setFormDescription(e.target.value)}
-                disabled={modalMode === 'view'}
               />
 
               <div className="flex justify-end gap-3 mt-6">
@@ -1167,16 +1320,14 @@ export default function Home() {
                 >
                   Cancel
                 </button>
-                {modalMode !== 'view' && (
-                  <button
-                    className="px-4 py-1.5 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                    onClick={saveCapability}
-                    disabled={!formName.trim()}
-                  >
-                    <FiPlus className="w-4 h-4" />
-                    {modalMode === 'edit' ? 'Save changes' : 'Add Capability'}
-                  </button>
-                )}
+                <button
+                  className="px-4 py-1.5 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  onClick={saveCapability}
+                  disabled={!formName.trim()}
+                >
+                  <FiPlus className="w-4 h-4" />
+                  {modalMode === 'edit' ? 'Save changes' : 'Add Capability'}
+                </button>
               </div>
             </div>
           </div>
@@ -1331,24 +1482,88 @@ export default function Home() {
         <div className="fixed inset-0 flex items-center justify-center z-50">
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsExportModalOpen(false)} />
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md z-50 overflow-hidden">
-            <div className="border-b border-gray-100 px-6 py-3 bg-gray-50 flex items-center gap-3">
-              <h2 className="text-lg font-bold text-gray-900">Export Capability as CSV</h2>
+            <div className="border-b border-gray-100 px-6 py-3 bg-gray-50">
+              <h2 className="text-lg font-bold text-gray-900">Export Capabilities as CSV</h2>
             </div>
             <div className="p-6">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Select Capability</label>
-              <select
-                className="w-full border rounded-md px-3 py-2 mb-4"
-                value={selectedExportCapId ?? ''}
-                onChange={(e) => setSelectedExportCapId(e.target.value ? Number(e.target.value) : null)}
-              >
-                <option value="">-- Select capability --</option>
-                {capabilities.map((c) => (
-                  <option key={c.id} value={String(c.id)}>{c.name}</option>
-                ))}
-              </select>
-              <div className="flex justify-end gap-2">
-                <button className="px-3 py-1.5 rounded-md text-gray-600 hover:bg-gray-100" onClick={() => setIsExportModalOpen(false)}>Cancel</button>
-                <button className={`px-4 py-2 rounded-md text-white ${isExporting ? 'bg-gray-400' : 'bg-indigo-600 hover:bg-indigo-700'}`} onClick={handleExportCapability} disabled={isExporting}>{isExporting ? 'Exporting...' : 'Export'}</button>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Select Capabilities</label>
+              {/* Custom multi-select dropdown */}
+              <div className="relative">
+                <div className="w-full border border-gray-300 rounded-md bg-white">
+                  {/* Trigger / selected summary */}
+                  <div className="px-3 py-2 text-sm text-gray-700 min-h-[38px] flex items-center gap-1 flex-wrap">
+                    {selectedExportCapIds.size === 0 ? (
+                      <span className="text-gray-400">-- Select capabilities --</span>
+                    ) : selectedExportCapIds.size === capabilities.length ? (
+                      <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full text-xs font-medium">All ({capabilities.length})</span>
+                    ) : (
+                      Array.from(selectedExportCapIds).map((id) => {
+                        const cap = capabilities.find((c) => c.id === id);
+                        return cap ? (
+                          <span key={id} className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1">
+                            {cap.name}
+                            <button
+                              className="hover:text-indigo-900 leading-none"
+                              onClick={(e) => { e.stopPropagation(); const n = new Set(selectedExportCapIds); n.delete(id); setSelectedExportCapIds(n); }}
+                            >×</button>
+                          </span>
+                        ) : null;
+                      })
+                    )}
+                  </div>
+                  {/* Divider + options list */}
+                  <div className="border-t border-gray-200">
+                    {/* Select all row */}
+                    <label className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-gray-50 border-b border-gray-100">
+                      <input
+                        type="checkbox"
+                        className="accent-indigo-600 w-4 h-4"
+                        checked={selectedExportCapIds.size === capabilities.length && capabilities.length > 0}
+                        onChange={(e) => setSelectedExportCapIds(e.target.checked ? new Set(capabilities.map((c) => c.id)) : new Set())}
+                      />
+                      <span className="text-sm font-medium text-gray-700">Select all</span>
+                    </label>
+                    {/* Capability options */}
+                    <div className="max-h-48 overflow-y-auto">
+                      {capabilities.map((c) => {
+                        const checked = selectedExportCapIds.has(c.id);
+                        return (
+                          <label key={c.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-gray-50">
+                            <input
+                              type="checkbox"
+                              className="accent-indigo-600 w-4 h-4 flex-shrink-0"
+                              checked={checked}
+                              onChange={(e) => {
+                                const n = new Set(selectedExportCapIds);
+                                if (e.target.checked) n.add(c.id); else n.delete(c.id);
+                                setSelectedExportCapIds(n);
+                              }}
+                            />
+                            <span className="text-sm text-gray-800 flex-1">{c.name}</span>
+                            {c.subvertical && (
+                              <span className="text-xs text-indigo-500 flex-shrink-0">{c.subvertical}</span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 mt-6">
+                <button
+                  className="px-3 py-1.5 rounded-md text-gray-600 hover:bg-gray-100"
+                  onClick={() => { setIsExportModalOpen(false); setSelectedExportCapIds(new Set()); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className={`px-4 py-2 rounded-md text-white ${isExporting || selectedExportCapIds.size === 0 ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                  onClick={handleExportCapability}
+                  disabled={isExporting || selectedExportCapIds.size === 0}
+                >
+                  {isExporting ? 'Exporting...' : `Export${selectedExportCapIds.size > 0 ? ` (${selectedExportCapIds.size})` : ''}`}
+                </button>
               </div>
             </div>
           </div>
@@ -1359,8 +1574,9 @@ export default function Home() {
       {isGeneratedModalOpen && (
         <div className="fixed inset-0 flex items-center justify-center z-50">
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsGeneratedModalOpen(false)} />
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl z-50 overflow-y-auto max-h-[80vh]">
-            <div className="border-b border-gray-100 px-6 py-3 bg-gray-50 flex items-center justify-between">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl z-50 max-h-[85vh] flex flex-col">
+            {/* Fixed Header */}
+            <div className="border-b border-gray-100 px-6 py-3 bg-gray-50 flex items-center justify-between flex-shrink-0">
               <div className="flex items-center gap-3">
                 <FiEdit3 className="w-5 h-5 text-blue-600" />
                 <h2 className="text-lg font-bold text-gray-900">Review generated processes</h2>
@@ -1394,7 +1610,8 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="p-6 space-y-4">
+            {/* Scrollable Content */}
+            <div className="p-6 space-y-4 overflow-y-auto flex-1">
               {(!generatedPreview || generatedPreview.length === 0) ? (
                 <div className="text-gray-500">No generated processes to review.</div>
               ) : (
@@ -1491,27 +1708,28 @@ export default function Home() {
                   })}
                 </ul>
               )}
+            </div>
 
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button
-                  className="px-3 py-1.5 rounded-md text-gray-600 hover:bg-gray-100"
-                  onClick={() => {
-                    setIsGeneratedModalOpen(false);
-                    setGeneratedPreview([]);
-                    setSelectedGeneratedIdxs(new Set());
-                  }}
-                >
-                  Cancel
-                </button>
+            {/* Fixed Footer */}
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100 bg-gray-50 flex-shrink-0">
+              <button
+                className="px-3 py-1.5 rounded-md text-gray-600 hover:bg-gray-100"
+                onClick={() => {
+                  setIsGeneratedModalOpen(false);
+                  setGeneratedPreview([]);
+                  setSelectedGeneratedIdxs(new Set());
+                }}
+              >
+                Cancel
+              </button>
 
-                <button
-                  className="px-4 py-1.5 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                  onClick={saveSelectedGeneratedProcesses}
-                  disabled={isSavingGenerated || selectedGeneratedIdxs.size === 0}
-                >
-                  {isSavingGenerated ? 'Saving...' : `Save selected (${selectedGeneratedIdxs.size})`}
-                </button>
-              </div>
+              <button
+                className="px-4 py-1.5 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={saveSelectedGeneratedProcesses}
+                disabled={isSavingGenerated || selectedGeneratedIdxs.size === 0}
+              >
+                {isSavingGenerated ? 'Saving...' : `Save selected (${selectedGeneratedIdxs.size})`}
+              </button>
             </div>
           </div>
         </div>

@@ -3,7 +3,7 @@ import type NVL from '@neo4j-nvl/base'
 import type { Node, Relationship, HitTargets } from '@neo4j-nvl/base'
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react'
 import type { MouseEventCallbacks } from '@neo4j-nvl/react'
-import EntitySelector from '../components/visualizer/EntitySelector'
+import EntitySelector, { ENTITY_TYPE_SLUG } from '../components/visualizer/EntitySelector'
 import ControlPanel from '../components/visualizer/ControlPanel'
 import NodeDetails from '../components/visualizer/NodeDetails'
 import { transformApiResponseToNvl } from '../components/visualizer/utils/transformer'
@@ -12,7 +12,9 @@ import type { EntityType, EntityListItem, Direction, ApiResponse } from '../comp
 import '../components/visualizer/visualizer.css'
 
 const API_BASE = '/api'
-const ANIMATION_DELAY = 300
+const ANIMATION_DELAY = 80
+const ANIMATION_BATCH_SIZE = 5   // nodes revealed per tick
+const ANIMATION_NODE_LIMIT = 80  // skip animation above this count
 const PATH_HIGHLIGHT_COLOR = '#1976D2'
 const PATH_STROKE_WIDTH = 3
 const NORMAL_STROKE_WIDTH = 1.5
@@ -47,38 +49,65 @@ const CompassVisualizer: React.FC = () => {
 
   const animateTraversal = useCallback((nodes: TraversalNode[], rels: TraversalRelationship[]) => {
     if (animationRef.current) clearTimeout(animationRef.current)
+
+    const allNvlNodes = nodes.map(n => ({ id: n.id, captions: n.captions, color: n.color, size: n.size, x: n.x, y: n.y }))
+    const allNvlRels = rels.map(r => ({ id: r.id, from: r.from, to: r.to, captions: r.captions, color: '#000000' }))
+
+    // Skip animation for large graphs to avoid crashing
+    if (nodes.length > ANIMATION_NODE_LIMIT) {
+      setVisibleNodes(allNvlNodes)
+      setVisibleRels(allNvlRels)
+      setAnimating(false)
+      setTimeout(() => { if (nvlRef.current && nodes.length > 0) nvlRef.current.fit(nodes.map(n => n.id)) }, 200)
+      return
+    }
+
     setVisibleNodes([])
     setVisibleRels([])
     setAnimating(true)
 
     const sortedNodes = [...nodes].sort((a, b) => a.traversalOrder - b.traversalOrder)
     const sortedRels = [...rels].sort((a, b) => a.traversalOrder - b.traversalOrder)
-    let nodeIndex = 0, relIndex = 0
+    let nodeIndex = 0
+    let relIndex = 0
 
     const animate = () => {
-      if (nodeIndex < sortedNodes.length) {
-        const currentNode = sortedNodes[nodeIndex]
-        setVisibleNodes(prev => [...prev, { id: currentNode.id, captions: currentNode.captions, color: currentNode.color, size: currentNode.size, x: currentNode.x, y: currentNode.y }])
-        while (relIndex < sortedRels.length) {
-          const rel = sortedRels[relIndex]
-          const targetOrder = sortedNodes.find(n => n.id === rel.to)?.traversalOrder ?? Infinity
-          if (targetOrder <= currentNode.traversalOrder) {
-            setVisibleRels(prev => [...prev, { id: rel.id, from: rel.from, to: rel.to, captions: rel.captions, color: '#000000' }])
-            relIndex++
-          } else break
-        }
-        nodeIndex++
-        animationRef.current = setTimeout(animate, ANIMATION_DELAY)
-      } else {
-        while (relIndex < sortedRels.length) {
-          const rel = sortedRels[relIndex]
-          setVisibleRels(prev => [...prev, { id: rel.id, from: rel.from, to: rel.to, captions: rel.captions, color: '#000000' }])
-          relIndex++
+      if (nodeIndex >= sortedNodes.length) {
+        // Flush any remaining rels
+        if (relIndex < sortedRels.length) {
+          const remaining = sortedRels.slice(relIndex).map(r => ({ id: r.id, from: r.from, to: r.to, captions: r.captions, color: '#000000' }))
+          setVisibleRels(prev => [...prev, ...remaining])
         }
         setAnimating(false)
         setTimeout(() => { if (nvlRef.current && nodes.length > 0) nvlRef.current.fit(nodes.map(n => n.id)) }, 200)
+        return
       }
+
+      // Reveal a batch of nodes at once
+      const batchEnd = Math.min(nodeIndex + ANIMATION_BATCH_SIZE, sortedNodes.length)
+      const batchNodes = sortedNodes.slice(nodeIndex, batchEnd)
+      const maxOrderInBatch = batchNodes[batchNodes.length - 1].traversalOrder
+
+      const newNvlNodes = batchNodes.map(n => ({ id: n.id, captions: n.captions, color: n.color, size: n.size, x: n.x, y: n.y }))
+
+      // Collect rels whose target is within this batch
+      const newNvlRels: Relationship[] = []
+      while (relIndex < sortedRels.length) {
+        const rel = sortedRels[relIndex]
+        const targetOrder = sortedNodes.find(n => n.id === rel.to)?.traversalOrder ?? Infinity
+        if (targetOrder <= maxOrderInBatch) {
+          newNvlRels.push({ id: rel.id, from: rel.from, to: rel.to, captions: rel.captions, color: '#000000' })
+          relIndex++
+        } else break
+      }
+
+      setVisibleNodes(prev => [...prev, ...newNvlNodes])
+      if (newNvlRels.length > 0) setVisibleRels(prev => [...prev, ...newNvlRels])
+
+      nodeIndex = batchEnd
+      animationRef.current = setTimeout(animate, ANIMATION_DELAY)
     }
+
     animate()
   }, [])
 
@@ -86,7 +115,8 @@ const CompassVisualizer: React.FC = () => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE}/subtree/${entityType}/all`)
+      const slug = ENTITY_TYPE_SLUG[entityType]
+      const res = await fetch(`${API_BASE}/subtree/${slug}/all`)
       if (!res.ok) throw new Error('Failed to fetch entities')
       setEntities(await res.json())
     } catch (err) {
@@ -101,8 +131,9 @@ const CompassVisualizer: React.FC = () => {
     setLoading(true)
     setError(null)
     try {
+      const slug = ENTITY_TYPE_SLUG[entityType]
       const depthParam = depth > 0 ? `&depth=${depth}` : ''
-      const res = await fetch(`${API_BASE}/subtree/${entityType}/id/${selectedEntityId}?direction=${direction}${depthParam}`)
+      const res = await fetch(`${API_BASE}/subtree/${slug}/id/${selectedEntityId}?direction=${direction}${depthParam}`)
       if (!res.ok) throw new Error('Failed to fetch subtree')
       const data: ApiResponse = await res.json()
       const { nodes: nvlNodes, rels: nvlRels, parentMap: newParentMap } = transformApiResponseToNvl(data)
@@ -156,7 +187,7 @@ const CompassVisualizer: React.FC = () => {
     setVisibleNodes(allNodes.map(n => ({ id: n.id, captions: n.captions, color: n.color, size: n.size, x: n.x, y: n.y })))
     setVisibleRels(allRels.map(r => ({ id: r.id, from: r.from, to: r.to, captions: r.captions, color: '#000000' })))
     setAnimating(false)
-    setTimeout(() => { if (nvlRef.current && allNodes.length > 0) nvlRef.current.fit(allNodes.map(n => n.id)) }, 200)
+    setTimeout(() => { if (nvlRef.current && allNodes.length > 0) nvlRef.current.fit(allNodes.map(n => n.id)) }, 100)
   }
 
   const zoomIn = useCallback(() => {
@@ -275,6 +306,8 @@ const CompassVisualizer: React.FC = () => {
         <span className="legend-item"><span className="dot subprocess"></span>Subprocess</span>
         <span className="legend-item"><span className="dot dataentity"></span>Data Entity</span>
         <span className="legend-item"><span className="dot dataelement"></span>Data Element</span>
+        <span className="legend-item"><span className="dot orgunit"></span>Org Unit</span>
+        <span className="legend-item"><span className="dot applicationcatalog"></span>Application</span>
       </div>
     </div>
   )

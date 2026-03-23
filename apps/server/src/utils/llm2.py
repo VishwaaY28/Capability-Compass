@@ -106,7 +106,7 @@ class GeminiClient:
         try:
             # Import settings manager here to avoid circular imports
             from config.llm_settings import llm_settings_manager
-            settings = await llm_settings_manager.get_all_settings()
+            settings = llm_settings_manager.get_all_settings()
 
             # Store vaultName from settings if provided (not used by Gemini client
             # currently, but keep for consistency and future secret retrieval).

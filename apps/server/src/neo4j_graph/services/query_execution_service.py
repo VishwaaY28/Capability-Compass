@@ -14,7 +14,7 @@ class Neo4jQueryService:
     def close(self):
         self.driver.close()
 
-    def execute_cypher(self, query: str):
+    def execute_cypher(self, query: str, parameters: dict = None):
         with self.driver.session() as session:
-            result = session.run(query)
+            result = session.run(query, parameters or {})
             return [record.data() for record in result]

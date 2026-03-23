@@ -1,0 +1,190 @@
+{
+  "application_catalog": {
+    "Fund Investment Objective Definition": [
+      "Aladdin by BlackRock"
+    ],
+    "Risk Appetite & Volatility Target Definition": [
+      "MSCI RiskMetrics"
+    ],
+    "Investment Time Horizon Definition": [
+      "Aladdin by BlackRock",
+      "FactSet"
+    ],
+    "Eligible Asset Class Definition": [
+      "Bloomberg Terminal"
+    ],
+    "Eligible Security Universe Definition": [
+      "FactSet",
+      "Bloomberg Terminal"
+    ],
+    "Benchmark Index Selection": [
+      "FTSE Russell Index Suite"
+    ],
+    "Benchmark Validation & Review": [
+      "MSCI Barra",
+      "Bloomberg Terminal"
+    ],
+    "Regulatory Constraint Definition": [
+      "Compliance software by Thomson Reuters",
+      "NICE Actimize"
+    ],
+    "Product Constraint Definition": [
+      "SimCorp Dimension"
+    ],
+    "Strategy Documentation & Approval": [
+      "DocuSign",
+      "Workflow tools integrated with investment platforms"
+    ],
+    "Macro Economic Research": [
+      "Bloomberg Terminal",
+      "FactSet"
+    ],
+    "Market Theme Identification": [
+      "S&P Capital IQ"
+    ],
+    "Sector & Industry Research": [
+      "Morningstar Direct",
+      "Capital IQ"
+    ],
+    "Security Fundamental Analysis": [
+      "FactSet",
+      "Bloomberg Terminal",
+      "S&P Capital IQ"
+    ],
+    "Valuation Model Development": [
+      "Excel models",
+      "Bloomberg",
+      "FactSet"
+    ],
+    "Earnings & Cash Flow Forecasting": [
+      "FactSet Financial Analytics",
+      "Bloomberg ESP"
+    ],
+    "Risk Assessment of Investment Ideas": [
+      "MSCI Barra Risk Models",
+      "Axioma Risk Analytics"
+    ],
+    "Investment Idea Documentation": [
+      "Custom Investment Idea Management Systems",
+      "SharePoint",
+      "Confluence"
+    ],
+    "Conviction & Priority Scoring": [
+      "Internal scoring models",
+      "Third-party platforms"
+    ],
+    "Research Review & Approval": [
+      "JIRA",
+      "Confluence"
+    ],
+    "Strategic Asset Allocation Definition": [
+      "BlackRock Aladdin",
+      "MSCI RiskMetrics"
+    ],
+    "Tactical Asset Allocation Decision": [
+      "Bloomberg PORT"
+    ],
+    "Security Selection for Portfolio": [
+      "FactSet",
+      "Bloomberg Terminal"
+    ],
+    "Position Sizing Determination": [
+      "Proprietary portfolio construction tools",
+      "Aladdin by BlackRock"
+    ],
+    "Portfolio Optimization Execution": [
+      "MSCI Barra",
+      "BlackRock Aladdin optimizer"
+    ],
+    "Scenario & Stress Testing": [
+      "MSCI RiskMetrics",
+      "Bloomberg Scenario Analysis"
+    ],
+    "Concentration Risk Validation": [
+      "MSCI RiskMetrics",
+      "Axioma Risk"
+    ],
+    "Liquidity Impact Assessment": [
+      "Bloomberg Liquidity Assessment Module"
+    ],
+    "Model Portfolio Creation": [
+      "Custom portfolio management software"
+    ],
+    "Portfolio Approval & Sign-off": [
+      "Governance workflows integrated with portfolio systems"
+    ],
+    "Trade Intent Generation": [
+      "BlackRock Aladdin",
+      "Charles River IMS"
+    ],
+    "Order Creation & Validation": [
+      "Charles River IMS",
+      "Eze OMS"
+    ],
+    "Pre-Trade Compliance Validation": [
+      "NICE Actimize",
+      "Compliance modules in OMS platforms"
+    ],
+    "Broker Selection & Routing": [
+      "FlexTrade",
+      "Portware"
+    ],
+    "Trade Execution Monitoring": [
+      "FlexTrade Execution Management System"
+    ],
+    "Trade Allocation to Funds": [
+      "Eze OMS allocation engine"
+    ],
+    "Post-Trade Compliance Validation": [
+      "AcadiaSoft",
+      "Compliance engines integrated with OMS"
+    ],
+    "Trade Confirmation Processing": [
+      "OMS and middle-office reconciliation systems"
+    ],
+    "Settlement Instruction Processing": [
+      "Broadridge Settlement systems"
+    ],
+    "Transaction Cost Analysis": [
+      "LiquidMetrix TCA",
+      "FlexTrade TCA"
+    ],
+    "Daily Portfolio Valuation Review": [
+      "BlackRock Aladdin",
+      "Bloomberg PORT"
+    ],
+    "Daily Performance Monitoring": [
+      "Avaloq",
+      "BlackRock Aladdin"
+    ],
+    "Exposure Monitoring": [
+      "MSCI RiskMetrics",
+      "BlackRock Aladdin Dashboard"
+    ],
+    "Factor Risk Monitoring": [
+      "MSCI Barra",
+      "Axioma Risk"
+    ],
+    "Limit Breach Detection": [
+      "Compliance systems linked with trading systems"
+    ],
+    "Drawdown Monitoring": [
+      "MSCI RiskMetrics",
+      "Bloomberg Terminal"
+    ],
+    "Volatility Monitoring": [
+      "Bloomberg",
+      "MSCI RiskMetrics"
+    ],
+    "Stress & Scenario Monitoring": [
+      "MSCI Scenario Analysis Tools"
+    ],
+    "Risk Mitigation Action Identification": [
+      "Aladdin",
+      "In-house risk systems"
+    ],
+    "Rebalancing Trigger Identification": [
+      "Portfolio Management systems with risk overlays"
+    ]
+  }
+}

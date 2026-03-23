@@ -186,10 +186,17 @@ class AzureOpenAIThinkingClient:
         except Exception as e:
             logger.warning(f"Failed to load DF_KNOWLEDGE: {e}")
 
-        # Build a dynamic official catalog from the CSV when available
+        # Build a dynamic official catalog from Neo4j (live DB), fall back to CSV
         self.official_catalog = []
+        self._catalog_loaded_from_db = False
         try:
-            if self.df_knowledge is not None:
+            self._load_catalog_from_db()
+        except Exception as e:
+            logger.warning(f"Could not load catalog from DB at init: {e}")
+
+        # If DB catalog is empty, fall back to CSV
+        if not self.official_catalog and self.df_knowledge is not None:
+            try:
                 caps = []
                 if 'Capability Name' in self.df_knowledge.columns:
                     caps = list(self.df_knowledge['Capability Name'].dropna().unique())
@@ -197,9 +204,9 @@ class AzureOpenAIThinkingClient:
                 if 'Process' in self.df_knowledge.columns:
                     procs = list(self.df_knowledge['Process'].dropna().unique())
                 self.official_catalog = list(dict.fromkeys(caps + procs))
-                logger.info(f"Built official catalog with {len(self.official_catalog)} items")
-        except Exception:
-            self.official_catalog = []
+                logger.info(f"Built official catalog from CSV fallback with {len(self.official_catalog)} items")
+            except Exception:
+                self.official_catalog = []
 
     def _load_config(self) -> Dict[str, Any]:
         """Get cached Azure OpenAI configuration (loaded at server startup)"""
@@ -211,6 +218,49 @@ class AzureOpenAIThinkingClient:
                 "api_version": get_azure_config().get("api_version"),
             }
         return self._config
+
+    def _load_catalog_from_db(self):
+        """
+        Load capability and process names directly from Neo4j so the catalog
+        always reflects the live graph — not a stale CSV snapshot.
+        Falls back silently; caller handles the empty-catalog case.
+        """
+        try:
+            from neo4j_graph.services.query_execution_service import Neo4jQueryService
+            svc = Neo4jQueryService()
+            try:
+                query = """
+                MATCH (c:Capability)
+                OPTIONAL MATCH (c)-[:REALIZED_BY]->(p:Process)
+                RETURN DISTINCT c.name AS cap_name, p.name AS proc_name
+                """
+                rows = svc.execute_cypher(query)
+            finally:
+                svc.close()
+
+            caps, procs = [], []
+            for row in rows:
+                if row.get("cap_name"):
+                    caps.append(row["cap_name"])
+                if row.get("proc_name"):
+                    procs.append(row["proc_name"])
+
+            catalog = list(dict.fromkeys(caps + procs))  # deduplicate, preserve order
+            if catalog:
+                self.official_catalog = catalog
+                self._catalog_loaded_from_db = True
+                logger.info(f"[CATALOG] Loaded {len(catalog)} items from Neo4j ({len(caps)} capabilities, {len(procs)} processes)")
+            else:
+                logger.warning("[CATALOG] Neo4j returned no capability/process names — catalog will be empty until data is imported")
+        except Exception as e:
+            logger.warning(f"[CATALOG] Failed to load catalog from Neo4j: {e}")
+
+    def refresh_catalog(self):
+        """Force-reload the catalog from Neo4j. Call this after CSV/document imports."""
+        self._catalog_loaded_from_db = False
+        self.official_catalog = []
+        self._load_catalog_from_db()
+        logger.info(f"[CATALOG] Refreshed — {len(self.official_catalog)} items")
 
     def _get_client(self) -> AzureOpenAI:
         """Get Azure OpenAI client instance (initialized at server startup)"""
@@ -1004,6 +1054,13 @@ Provide both your thinking process and final analysis."""
         return "portfolio manager", 2
 
     def _extract_all_anchors(self, user_query: str) -> List[str]:
+        # Lazily refresh catalog from DB if it hasn't been loaded yet or is empty
+        if not self.official_catalog or not self._catalog_loaded_from_db:
+            try:
+                self._load_catalog_from_db()
+            except Exception:
+                pass
+
         found: List[str] = []
         temp = user_query
         catalog = self.official_catalog or OFFICIAL_CATALOG
@@ -1099,117 +1156,117 @@ Provide both your thinking process and final analysis."""
         queries: List[str] = []
         depth = plan.get("depth_scope") or 2
         vertical = plan.get("vertical")  # Get vertical filter from plan
-
-        for anchor in plan.get("primary_anchors", []):
-            intent = plan.get("intent")
-            # Determine relationship candidates based on intent
-            if intent == "Strategic":
-                candidate_rels = ["ENABLED_BY", "ACCOUNTABLE_FOR", "REALIZED_BY"]
-            elif intent == "Operational":
-                candidate_rels = ["DECOMPOSES", "SUPPORTS", "REALIZED_BY"]
-            else:
-                candidate_rels = ["REALIZED_BY", "USES_DATA", "DECOMPOSES", "HAS_ELEMENT"]
-
-            # Attempt to detect which relationship types actually exist in the database
-            rel_pattern = None
-            try:
-                existing_rels = set()
-                if callable(getattr(self, "_default_db_fetch", None)):
-                    resp = self._default_db_fetch("CALL db.relationshipTypes()")
-                    if isinstance(resp, list):
-                        existing_rels = set([str(x).upper() for x in resp if x])
-                    elif isinstance(resp, dict):
-                        if "results" in resp and isinstance(resp["results"], list):
-                            vals = []
-                            try:
-                                for row in resp["results"]:
-                                    for d in row.get("data", []):
-                                        for v in d.get("row", []):
-                                            if isinstance(v, list):
-                                                vals.extend(v)
-                                            else:
-                                                vals.append(v)
-                            except Exception:
-                                vals = []
-                            existing_rels = set([str(x).upper() for x in vals if x])
-                        else:
-                            existing_rels = set([str(v).upper() for v in resp.values() if isinstance(v, str)])
-
-                selected = [r for r in candidate_rels if r in existing_rels]
-                if selected:
-                    rel_pattern = "|".join(selected)
-                    logger.debug(f"Using existing relationship types for intent={intent}: {rel_pattern}")
-                else:
-                    rel_pattern = None
-                    logger.debug(f"No candidate relationship types found in DB for intent={intent}, falling back to any-relationship pattern")
-            except Exception as e:
-                logger.warning(f"Could not inspect DB relationship types: {e}")
-                rel_pattern = "|".join(candidate_rels)
-
-            # Escape single quotes in anchor to avoid Cypher injection/syntax errors
-            safe_anchor = anchor.replace("'", "''") if isinstance(anchor, str) else anchor
-
-            # Build Cypher: if rel_pattern is None, use wildcard relationship in pattern
-            if rel_pattern:
-                rel_section = f":{rel_pattern}*1..{depth}"
-            else:
-                rel_section = f"*1..{depth}"
-
-            # Build WHERE clause to filter by vertical if provided
-            where_clause = ""
+        
+        # Get primary anchors
+        primary_anchors = plan.get("primary_anchors", [])
+        
+        # If no anchors found, create a general query to fetch vertical data
+        if not primary_anchors:
+            logger.warning("[QUERY GENERATION] No primary anchors found - generating general vertical query")
             if vertical:
                 safe_vertical = vertical.replace("'", "''")
-                where_clause = f" WHERE root.vertical = '{safe_vertical}' OR any(node IN [root] + related_nodes WHERE node.vertical = '{safe_vertical}')"
+                # Query to get all capabilities and their processes for the vertical
+                general_query = f"""
+                MATCH (v:Vertical {{name: '{safe_vertical}'}})-[:HAS_SUBVERTICAL]->(sv:SubVertical)-[:HAS_CAPABILITY]->(c:Capability)
+                OPTIONAL MATCH (c)-[:REALIZED_BY]->(p:Process)
+                OPTIONAL MATCH (p)-[:DECOMPOSES]->(sp:Subprocess)
+                WITH c, collect(DISTINCT p) as processes, collect(DISTINCT sp) as subprocesses
+                RETURN c.name as capability_name, c.description as capability_description,
+                       [proc IN processes | {{name: proc.name, description: proc.description}}] as processes,
+                       [sp IN subprocesses | {{name: sp.name, description: sp.description}}] as subprocesses
+                LIMIT 10
+                """
+                return general_query.strip()
+            else:
+                # No vertical specified - return a very general query
+                logger.warning("[QUERY GENERATION] No vertical specified - returning minimal query")
+                general_query = """
+                MATCH (c:Capability)
+                OPTIONAL MATCH (c)-[:REALIZED_BY]->(p:Process)
+                WITH c, collect(DISTINCT p) as processes
+                RETURN c.name as capability_name, c.description as capability_description,
+                       [proc IN processes | {{name: proc.name, description: proc.description}}] as processes
+                LIMIT 10
+                """
+                return general_query.strip()
+
+        for anchor in primary_anchors:
+            # Escape single quotes in anchor to avoid Cypher injection/syntax errors
+            safe_anchor = anchor.replace("'", "''") if isinstance(anchor, str) else anchor
+            
+            # Build WHERE clause to filter by vertical if provided
+            vertical_filter = ""
+            if vertical:
+                safe_vertical = vertical.replace("'", "''")
+                vertical_filter = f"""
+                OPTIONAL MATCH (v:Vertical {{name: '{safe_vertical}'}})-[:HAS_SUBVERTICAL]->(sv:SubVertical)-[:HAS_CAPABILITY]->(cap)
+                WITH root, cap, v, sv
+                WHERE v IS NOT NULL AND (root:Capability OR cap = root OR (root)-[:REALIZED_BY*0..2]-(cap))
+                """
                 logger.debug(f"[VERTICAL FILTER] Applied vertical filter for: {vertical}")
             else:
                 logger.debug(f"[VERTICAL FILTER] No vertical filter applied - querying all verticals")
-
-            q = f'''MATCH (root {{name: '{safe_anchor}'}}) OPTIONAL MATCH path = (root)-[{rel_section}]-(related) WITH root, collect(DISTINCT related) as related_nodes, collect(DISTINCT path) as paths UNWIND paths as p UNWIND relationships(p) as rel WITH root, related_nodes, collect(DISTINCT {{ type: type(rel), from_node: startNode(rel).name, to_node: endNode(rel).name }}) as rels{where_clause} RETURN root, labels(root) as root_labels, related_nodes, rels as relationships'''
-            queries.append(q)
+            
+            # Build comprehensive query that works for Capability, Process, or Subprocess anchors
+            # This query traverses both upward (to parent Capability) and downward (to child nodes)
+            q = f"""
+            MATCH (root)
+            WHERE root.name = '{safe_anchor}' AND (root:Capability OR root:Process OR root:Subprocess)
+            {vertical_filter}
+            
+            // Get parent capability if root is Process or Subprocess
+            OPTIONAL MATCH (parent_cap:Capability)-[:REALIZED_BY]->(root)
+            OPTIONAL MATCH (parent_proc:Process)-[:DECOMPOSES]->(root)
+            OPTIONAL MATCH (parent_cap2:Capability)-[:REALIZED_BY]->(parent_proc)
+            
+            // Get child processes if root is Capability
+            OPTIONAL MATCH (root)-[:REALIZED_BY]->(child_proc:Process)
+            
+            // Get child subprocesses if root is Capability or Process
+            OPTIONAL MATCH (root)-[:REALIZED_BY|DECOMPOSES*1..2]->(child_sp:Subprocess)
+            
+            // Get data entities and elements from subprocesses
+            OPTIONAL MATCH (all_sp:Subprocess)-[:USES_DATA]->(de:DataEntity)
+            WHERE all_sp = root OR all_sp = child_sp OR (parent_proc)-[:DECOMPOSES]->(all_sp)
+            OPTIONAL MATCH (de)-[:HAS_ELEMENT]->(elem:DataElements)
+            
+            // Get org units and applications
+            OPTIONAL MATCH (all_sp2:Subprocess)-[:OWNED_BY]->(org:OrgUnit)
+            WHERE all_sp2 = root OR all_sp2 = child_sp OR (parent_proc)-[:DECOMPOSES]->(all_sp2)
+            OPTIONAL MATCH (all_sp3:Subprocess)-[:USES_APPLICATION]->(app:ApplicationCatalog)
+            WHERE all_sp3 = root OR all_sp3 = child_sp OR (parent_proc)-[:DECOMPOSES]->(all_sp3)
+            
+            WITH root,
+                 COALESCE(parent_cap, parent_cap2) as parent_capability,
+                 parent_proc,
+                 collect(DISTINCT child_proc) as child_processes,
+                 collect(DISTINCT child_sp) as child_subprocesses,
+                 collect(DISTINCT de) as data_entities,
+                 collect(DISTINCT elem) as data_elements,
+                 collect(DISTINCT org) as org_units,
+                 collect(DISTINCT app) as applications
+            
+            RETURN 
+                root.name as root_name,
+                root.description as root_description,
+                labels(root) as root_labels,
+                parent_capability.name as parent_capability_name,
+                parent_capability.description as parent_capability_description,
+                parent_proc.name as parent_process_name,
+                parent_proc.description as parent_process_description,
+                [proc IN child_processes | {{name: proc.name, description: proc.description, uid: proc.uid}}] as processes,
+                [sub IN child_subprocesses | {{name: sub.name, description: sub.description, uid: sub.uid}}] as subprocesses,
+                [de IN data_entities | {{name: de.name, description: de.data_entity_description, uid: de.uid}}] as data_entities,
+                [elem IN data_elements | {{name: elem.name, description: elem.data_element_description, uid: elem.uid}}] as data_elements,
+                [o IN org_units | {{name: o.name, uid: o.uid}}] as org_units,
+                [a IN applications | {{name: a.name, uid: a.uid}}] as applications
+            """
+            queries.append(q.strip())
 
         return " UNION ".join(queries)
 
     def _serialize_db_records(self, records: Any, plan: Dict[str, Any]) -> str:
         """Serialize DB records with persona-aware hydration and proper metadata extraction."""
-        
-        def hydrate_node(node_name: str, persona: str) -> str:
-            """Hydrate a node with persona-appropriate metadata from DF_KNOWLEDGE."""
-            try:
-                # Handle None or empty node names
-                if not node_name:
-                    return "- <unnamed node>"
-                
-                # If no knowledge base, return node name only
-                if self.df_knowledge is None or self.df_knowledge.empty:
-                    return f"- {node_name}"
-                
-                # Look up the node in DF_KNOWLEDGE
-                meta = self.df_knowledge[
-                    (self.df_knowledge.get('Capability Name', pd.Series(dtype=str)) == node_name) |
-                    (self.df_knowledge.get('Process', pd.Series(dtype=str)) == node_name)
-                ]
-                
-                if meta.empty:
-                    return f"- {node_name}"
-                
-                row = meta.iloc[0]
-                
-                # Persona-specific formatting
-                if persona == "Executive":
-                    # Executive: minimalist, name only
-                    return f"- {node_name}"
-                elif persona == "portfolio manager":
-                    # portfolio manager: include process description
-                    desc = str(row.get('Process Description', 'N/A')) if 'Process Description' in row.index else 'N/A'
-                    return f"- {node_name}: {desc}"
-                else:  # Investment Analyst
-                    # Investment Analyst: detailed with entity and element
-                    entity = str(row.get('Data Entity', 'N/A')) if 'Data Entity' in row.index else 'N/A'
-                    element = str(row.get('Data Element', 'N/A')) if 'Data Element' in row.index else 'N/A'
-                    return f"- {node_name} -> Entity: {entity} | Element: {element}"
-            except Exception as e:
-                logger.warning(f"Error hydrating node {node_name}: {e}")
-                return f"- {node_name}" if node_name else "- <unnamed node>"
         
         try:
             persona = plan.get("persona_tone", "portfolio manager") if isinstance(plan, dict) else "portfolio manager"
@@ -1248,7 +1305,7 @@ Provide both your thinking process and final analysis."""
 
                 return "\n".join(lines) if lines else "No retrieved graph context available."
             
-            # Handle Cypher response structure (Neo4j graph results)
+            # Handle new Cypher response structure from updated query
             if isinstance(records, dict):
                 records_iter = [records]
             elif isinstance(records, list):
@@ -1262,72 +1319,164 @@ Provide both your thinking process and final analysis."""
                     lines.append(f"- {str(rec)}")
                     continue
 
-                # Extract components from Cypher response: root, root_labels, related_nodes, relationships
-                root_node = rec.get("root", {})
-                root_name = None
-                if isinstance(root_node, dict):
-                    root_name = root_node.get("name") or root_node.get("id")
+                # Extract components from new Cypher response format
+                root_name = rec.get("root_name")
+                root_desc = rec.get("root_description", "")
+                root_labels = rec.get("root_labels", [])
                 
-                related_nodes = rec.get("related_nodes", []) or []
-                relationships = rec.get("relationships", []) or []
+                # Extract parent context (for when anchor is Process or Subprocess)
+                parent_cap_name = rec.get("parent_capability_name")
+                parent_cap_desc = rec.get("parent_capability_description", "")
+                parent_proc_name = rec.get("parent_process_name")
+                parent_proc_desc = rec.get("parent_process_description", "")
+                
+                # Extract child nodes
+                processes = rec.get("processes", [])
+                subprocesses = rec.get("subprocesses", [])
+                data_entities = rec.get("data_entities", [])
+                data_elements = rec.get("data_elements", [])
+                org_units = rec.get("org_units", [])
+                applications = rec.get("applications", [])
+                
+                if not root_name:
+                    continue
+                
+                # Determine root type from labels
+                root_type = "Entity"
+                if "Capability" in root_labels:
+                    root_type = "Capability"
+                elif "Process" in root_labels:
+                    root_type = "Process"
+                elif "Subprocess" in root_labels:
+                    root_type = "Subprocess"
                 
                 # Build context based on persona
                 if persona == "Executive":
-                    # Executive: root node only, minimal detail
-                    if root_name:
-                        lines.append(hydrate_node(root_name, "Executive"))
+                    # Executive: Show hierarchy context + root node, minimal detail
+                    if parent_cap_name:
+                        lines.append(f"- Parent Capability: {parent_cap_name}")
+                    if parent_proc_name and root_type == "Subprocess":
+                        lines.append(f"  - Parent Process: {parent_proc_name}")
+                    
+                    lines.append(f"  - {root_type}: {root_name}")
+                    if root_desc:
+                        lines.append(f"    Description: {root_desc}")
                 
                 elif persona == "portfolio manager":
-                    # portfolio manager: root + relationships with description
-                    if root_name:
-                        lines.append(hydrate_node(root_name, "portfolio manager"))
+                    # portfolio manager: Show hierarchy + root + child processes/subprocesses with descriptions
+                    if parent_cap_name:
+                        lines.append(f"- Parent Capability: {parent_cap_name}")
+                        if parent_cap_desc:
+                            lines.append(f"  Description: {parent_cap_desc}")
                     
-                    # Add related nodes with hydration
-                    for node in related_nodes[:10]:
-                        if isinstance(node, dict):
-                            node_name = node.get("name") or node.get("id", "")
-                            if node_name:
-                                hydrated = hydrate_node(node_name, "portfolio manager")
-                                lines.append(f"  {hydrated}")
-                        elif isinstance(node, str):
-                            lines.append(f"  - {node}")
+                    if parent_proc_name and root_type == "Subprocess":
+                        lines.append(f"  - Parent Process: {parent_proc_name}")
+                        if parent_proc_desc:
+                            lines.append(f"    Description: {parent_proc_desc}")
                     
-                    # Add relationships showing connections
-                    for rel in relationships[:10]:
-                        if isinstance(rel, dict):
-                            rel_type = rel.get("type", "")
-                            from_node = rel.get("from_node", "")
-                            to_node = rel.get("to_node", "")
-                            if from_node and to_node:
-                                lines.append(f"  [{from_node}] -{rel_type}-> [{to_node}]")
+                    lines.append(f"  - {root_type}: {root_name}")
+                    if root_desc:
+                        lines.append(f"    Description: {root_desc}")
+                    
+                    # Show child processes
+                    if processes:
+                        lines.append("    Child Processes:")
+                        for proc in processes[:10]:
+                            proc_name = proc.get("name", "")
+                            proc_desc = proc.get("description", "")
+                            if proc_name:
+                                lines.append(f"      - {proc_name}: {proc_desc}")
+                    
+                    # Show child subprocesses
+                    if subprocesses:
+                        lines.append("    Child Subprocesses:")
+                        for sub in subprocesses[:10]:
+                            sub_name = sub.get("name", "")
+                            sub_desc = sub.get("description", "")
+                            if sub_name:
+                                lines.append(f"      - {sub_name}: {sub_desc}")
                 
                 else:  # Investment Analyst
-                    # Investment Analyst: comprehensive detail with all metadata
-                    if root_name:
-                        lines.append(hydrate_node(root_name, "Investment Analyst"))
+                    # Investment Analyst: Comprehensive detail with full hierarchy and all metadata
+                    if parent_cap_name:
+                        lines.append(f"- Parent Capability: {parent_cap_name}")
+                        if parent_cap_desc:
+                            lines.append(f"  Description: {parent_cap_desc}")
                     
-                    # Show all related nodes with full hydration (data entities and elements)
-                    if related_nodes:
-                        lines.append("  Related Entities:")
-                        for node in related_nodes[:20]:
-                            if isinstance(node, dict):
-                                node_name = node.get("name") or node.get("id", "")
-                                if node_name:
-                                    hydrated = hydrate_node(node_name, "Investment Analyst")
-                                    lines.append(f"    {hydrated}")
-                            elif isinstance(node, str):
-                                lines.append(f"    - {node}")
+                    if parent_proc_name and root_type == "Subprocess":
+                        lines.append(f"  - Parent Process: {parent_proc_name}")
+                        if parent_proc_desc:
+                            lines.append(f"    Description: {parent_proc_desc}")
                     
-                    # Show all relationships with full context
-                    if relationships:
-                        lines.append("  Relationships:")
-                        for rel in relationships[:20]:
-                            if isinstance(rel, dict):
-                                rel_type = rel.get("type", "")
-                                from_node = rel.get("from_node", "")
-                                to_node = rel.get("to_node", "")
-                                if from_node and to_node:
-                                    lines.append(f"    [{from_node}] -{rel_type}-> [{to_node}]")
+                    lines.append(f"  - {root_type}: {root_name}")
+                    if root_desc:
+                        lines.append(f"    Description: {root_desc}")
+                    
+                    # Show child processes with full detail
+                    if processes:
+                        lines.append("    Child Processes:")
+                        for proc in processes[:20]:
+                            proc_name = proc.get("name", "")
+                            proc_desc = proc.get("description", "")
+                            proc_uid = proc.get("uid", "")
+                            if proc_name:
+                                lines.append(f"      - {proc_name} (UID: {proc_uid})")
+                                if proc_desc:
+                                    lines.append(f"        Description: {proc_desc}")
+                    
+                    # Show child subprocesses with full detail
+                    if subprocesses:
+                        lines.append("    Child Subprocesses:")
+                        for sub in subprocesses[:20]:
+                            sub_name = sub.get("name", "")
+                            sub_desc = sub.get("description", "")
+                            sub_uid = sub.get("uid", "")
+                            if sub_name:
+                                lines.append(f"      - {sub_name} (UID: {sub_uid})")
+                                if sub_desc:
+                                    lines.append(f"        Description: {sub_desc}")
+                    
+                    # Show org units
+                    if org_units:
+                        lines.append("    Organizational Units:")
+                        for org in org_units[:20]:
+                            org_name = org.get("name", "")
+                            org_uid = org.get("uid", "")
+                            if org_name:
+                                lines.append(f"      - {org_name} (UID: {org_uid})")
+                    
+                    # Show applications
+                    if applications:
+                        lines.append("    Applications:")
+                        for app in applications[:20]:
+                            app_name = app.get("name", "")
+                            app_uid = app.get("uid", "")
+                            if app_name:
+                                lines.append(f"      - {app_name} (UID: {app_uid})")
+                    
+                    # Show data entities
+                    if data_entities:
+                        lines.append("    Data Entities:")
+                        for de in data_entities[:20]:
+                            de_name = de.get("name", "")
+                            de_desc = de.get("description", "")
+                            de_uid = de.get("uid", "")
+                            if de_name:
+                                lines.append(f"      - {de_name} (UID: {de_uid})")
+                                if de_desc:
+                                    lines.append(f"        Description: {de_desc}")
+                    
+                    # Show data elements
+                    if data_elements:
+                        lines.append("    Data Elements:")
+                        for elem in data_elements[:20]:
+                            elem_name = elem.get("name", "")
+                            elem_desc = elem.get("description", "")
+                            elem_uid = elem.get("uid", "")
+                            if elem_name:
+                                lines.append(f"      - {elem_name} (UID: {elem_uid})")
+                                if elem_desc:
+                                    lines.append(f"        Description: {elem_desc}")
 
             return "\n".join(lines) if lines else "No retrieved graph context available."
         

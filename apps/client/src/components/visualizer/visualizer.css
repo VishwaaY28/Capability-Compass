@@ -1,7 +1,7 @@
 .viz-app {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 60px); /* account for app sidebar/header */
+  height: 100%;
   width: 100%;
   overflow: hidden;
 }
@@ -166,11 +166,13 @@
 
 .viz-app .legend-item { display: flex; align-items: center; gap: 0.5rem; color: #333333; font-size: 0.85rem; }
 .viz-app .dot { width: 12px; height: 12px; border-radius: 50%; }
-.viz-app .dot.capability { background: #FF6B6B; }
-.viz-app .dot.process { background: #4ECDC4; }
-.viz-app .dot.subprocess { background: #45B7D1; }
-.viz-app .dot.dataentity { background: #A990D5; }
-.viz-app .dot.dataelement { background: #F7B731; }
+.viz-app .dot.capability        { background: #E63946; }
+.viz-app .dot.process           { background: #2A9D8F; }
+.viz-app .dot.subprocess        { background: #457B9D; }
+.viz-app .dot.dataentity        { background: #E76F51; }
+.viz-app .dot.dataelement       { background: #F4A261; }
+.viz-app .dot.orgunit           { background: #6A0572; }
+.viz-app .dot.applicationcatalog { background: #1D8348; }
 
 .viz-app .animation-indicator {
   position: absolute;

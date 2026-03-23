@@ -2,12 +2,14 @@ import type { Node, Relationship } from '@neo4j-nvl/base'
 import type { ApiNode, ApiResponse } from '../types'
 
 const LABEL_COLORS: Record<string, string> = {
-  Capability: '#FF6B6B',
-  Process: '#4ECDC4',
-  Subprocess: '#45B7D1',
-  DataEntity: '#A990D5',
-  DataElements: '#F7B731',
-  DataElement: '#F7B731',
+  Capability:       '#E63946', // vivid red
+  Process:          '#2A9D8F', // teal green
+  Subprocess:       '#457B9D', // steel blue
+  DataEntity:       '#E76F51', // burnt orange
+  DataElements:     '#F4A261', // sandy orange (alias)
+  DataElement:      '#F4A261', // sandy orange
+  OrgUnit:          '#6A0572', // deep purple
+  ApplicationCatalog: '#1D8348', // forest green
 }
 
 export interface TransformResult {

@@ -3,6 +3,10 @@ DeepAgent-based capability model extractor.
 
 This module handles PDF/document parsing and capability model extraction
 using DeepAgent with man-in-the-middle callback streaming.
+
+Includes performance optimizations:
+- Larger chunk sizes (1500 chars) to reduce LLM processing overhead
+- Extraction result caching based on file hash to avoid re-processing identical documents
 """
 
 import os
@@ -10,6 +14,7 @@ import json
 import logging
 import asyncio
 import tempfile
+import hashlib
 from typing import List, Dict, AsyncGenerator, Optional
 from pathlib import Path
 from datetime import datetime
@@ -28,6 +33,124 @@ _azure_llm_cache = {
     "llm": None,
     "embedder": None
 }
+
+# Module-level cache for extraction results to avoid re-processing identical documents
+# Cache structure: {file_hash: {extraction_data, timestamp, config_hash}}
+_extraction_cache = {}
+_cache_dir = Path("extraction_cache")
+
+
+def _compute_file_hash(file_path: str) -> str:
+    """
+    Compute SHA256 hash of a file for cache key generation.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        Hexadecimal hash string
+    """
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            # Read file in chunks to handle large files efficiently
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except Exception as e:
+        logger.warning(f"Failed to compute file hash: {e}")
+        return None
+
+
+def _compute_config_hash(vertical: Optional[str], subvertical: Optional[str], extraction_depth: str) -> str:
+    """
+    Compute hash of extraction configuration parameters.
+    
+    Args:
+        vertical: Vertical name
+        subvertical: SubVertical name
+        extraction_depth: Extraction depth level
+        
+    Returns:
+        Hexadecimal hash string
+    """
+    config_str = f"{vertical or ''}|{subvertical or ''}|{extraction_depth}"
+    return hashlib.sha256(config_str.encode()).hexdigest()
+
+
+def _get_cached_extraction(file_hash: str, config_hash: str) -> Optional[Dict]:
+    """
+    Retrieve cached extraction result if available and valid.
+    
+    Args:
+        file_hash: Hash of the input file
+        config_hash: Hash of extraction configuration
+        
+    Returns:
+        Cached extraction data or None if not found/invalid
+    """
+    try:
+        # Check in-memory cache first
+        cache_key = f"{file_hash}_{config_hash}"
+        if cache_key in _extraction_cache:
+            cached = _extraction_cache[cache_key]
+            logger.info(f"[CACHE HIT] Found cached extraction in memory (timestamp: {cached.get('timestamp')})")
+            return cached.get("extraction_data")
+        
+        # Check disk cache
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = _cache_dir / f"{cache_key}.json"
+        
+        if cache_file.exists():
+            with cache_file.open("r", encoding="utf-8") as f:
+                cached = json.load(f)
+                # Cache entries are valid indefinitely unless file changes
+                logger.info(f"[CACHE HIT] Found cached extraction on disk (timestamp: {cached.get('timestamp')})")
+                # Load into memory cache for faster subsequent access
+                _extraction_cache[cache_key] = cached
+                return cached.get("extraction_data")
+        
+        logger.info("[CACHE MISS] No cached extraction found")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Failed to retrieve cached extraction: {e}")
+        return None
+
+
+def _save_extraction_to_cache(file_hash: str, config_hash: str, extraction_data: Dict):
+    """
+    Save extraction result to cache (both memory and disk).
+    
+    Args:
+        file_hash: Hash of the input file
+        config_hash: Hash of extraction configuration
+        extraction_data: The extracted capability model data
+    """
+    try:
+        cache_key = f"{file_hash}_{config_hash}"
+        cached_entry = {
+            "extraction_data": extraction_data,
+            "timestamp": datetime.now().isoformat(),
+            "file_hash": file_hash,
+            "config_hash": config_hash
+        }
+        
+        # Save to memory cache
+        _extraction_cache[cache_key] = cached_entry
+        
+        # Save to disk cache
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = _cache_dir / f"{cache_key}.json"
+        
+        with cache_file.open("w", encoding="utf-8") as f:
+            json.dump(cached_entry, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"[CACHE SAVE] Saved extraction to cache: {cache_file}")
+        
+    except Exception as e:
+        logger.warning(f"Failed to save extraction to cache: {e}")
+
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -56,14 +179,14 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         logger.info(f"LLM processing completed")
 
 
-def load_document(path: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Dict]:
+def load_document(path: str, chunk_size: int = 1500, chunk_overlap: int = 100) -> List[Dict]:
     """
     Load .pdf/.docx/.txt and return chunk dicts: [{"text": "...", "metadata": {...}}]
     
     Args:
         path: File path to load
-        chunk_size: Character size for text chunks
-        chunk_overlap: Overlap between chunks
+        chunk_size: Character size for text chunks (increased to 1500 for better performance)
+        chunk_overlap: Overlap between chunks (increased to 100 for better context)
         
     Returns:
         List of chunk dictionaries with text and metadata
@@ -373,6 +496,68 @@ DO NOT EXTRACT DEEPER THAN THIS LEVEL. VIOLATING THIS CONSTRAINT WILL CAUSE IMPO
 """
 
 
+def _enforce_depth(data: Dict, extraction_depth: str) -> Dict:
+    """
+    Post-process extracted data to strictly enforce the requested depth.
+    Trims any data that goes deeper than the requested level.
+    This is a hard guarantee regardless of what the LLM returned.
+
+    Depth hierarchy:
+        capability < process < subprocess < data_entity < data_element
+    """
+    DEPTH_ORDER = ["capability", "process", "subprocess", "data_entity", "data_element"]
+    depth_idx = DEPTH_ORDER.index(extraction_depth) if extraction_depth in DEPTH_ORDER else len(DEPTH_ORDER) - 1
+
+    result = {k: v for k, v in data.items() if k != "processes"}
+
+    if depth_idx < 1:
+        # capability only — no processes
+        result["processes"] = []
+        return result
+
+    trimmed_processes = []
+    for proc in data.get("processes", []):
+        p = {k: v for k, v in proc.items() if k != "subprocesses"}
+
+        if depth_idx < 2:
+            # process only — no subprocesses
+            p["subprocesses"] = []
+            trimmed_processes.append(p)
+            continue
+
+        trimmed_subs = []
+        for sp in proc.get("subprocesses", []):
+            s = {k: v for k, v in sp.items() if k != "data_entities"}
+
+            if depth_idx < 3:
+                # subprocess only — no data entities
+                s["data_entities"] = []
+                trimmed_subs.append(s)
+                continue
+
+            trimmed_entities = []
+            for de in sp.get("data_entities", []):
+                e = {k: v for k, v in de.items() if k != "data_elements"}
+
+                if depth_idx < 4:
+                    # data_entity only — no data elements
+                    e["data_elements"] = []
+                else:
+                    # data_element — keep everything
+                    e["data_elements"] = de.get("data_elements", [])
+
+                trimmed_entities.append(e)
+
+            s["data_entities"] = trimmed_entities
+            trimmed_subs.append(s)
+
+        p["subprocesses"] = trimmed_subs
+        trimmed_processes.append(p)
+
+    result["processes"] = trimmed_processes
+    return result
+
+
 async def extract_capability_model(
     file_path: str,
     output_dir: Optional[str] = None,
@@ -387,6 +572,10 @@ async def extract_capability_model(
     Streams progress updates as the extraction proceeds, allowing the frontend
     to show real-time feedback during LLM processing.
     
+    Performance optimizations:
+    - Caching: Identical files with same config return cached results instantly
+    - Larger chunks: 1500 chars (vs 500) reduces LLM processing overhead by ~66%
+    
     Args:
         file_path: Path to the document file (.pdf, .docx, .txt)
         output_dir: Directory to save extracted JSON (optional)
@@ -398,6 +587,7 @@ async def extract_capability_model(
     Yields:
         Dictionary events with status and data:
         - {"status": "started", "filename": "..."}
+        - {"status": "cache_hit", "data": {...cached model...}}
         - {"status": "loading", "progress": 0-100}
         - {"status": "extracting", "progress": 0-100}
         - {"status": "success", "data": {...extracted model...}, "output_path": "..."}
@@ -421,6 +611,39 @@ async def extract_capability_model(
             "filename": os.path.basename(file_path)
         }
         
+        # Check cache first
+        file_hash = _compute_file_hash(file_path)
+        config_hash = _compute_config_hash(vertical, subvertical, extraction_depth)
+        
+        if file_hash and config_hash:
+            cached_result = _get_cached_extraction(file_hash, config_hash)
+            if cached_result:
+                logger.info("[CACHE] Returning cached extraction result - skipping LLM processing")
+                # Enforce depth on cached result too
+                cached_result = _enforce_depth(cached_result, extraction_depth)
+                yield {
+                    "status": "cache_hit",
+                    "progress": 100,
+                    "message": "Retrieved from cache (instant)",
+                    "data": cached_result,
+                    "cached": True
+                }
+                # Still need to return output_path and chunks_path for compatibility
+                # Generate paths even though we're using cache
+                source_filename = Path(file_path).stem
+                output_dir = "Json_Documents"
+                output_path = os.path.join(output_dir, "extracted_capability_model.json")
+                
+                yield {
+                    "status": "success",
+                    "progress": 100,
+                    "message": "Extraction complete (from cache)",
+                    "data": cached_result,
+                    "output_path": output_path,
+                    "cached": True
+                }
+                return
+        
         # Step 1: Load and chunk the document ONCE, before agent creation
         yield {
             "status": "loading",
@@ -430,12 +653,12 @@ async def extract_capability_model(
         
         chunks = load_document(file_path)
         chunk_count = len(chunks)
-        logger.info(f"[Extractor] Loaded {chunk_count} chunks from document")
+        logger.info(f"[Extractor] Loaded {chunk_count} chunks from document (chunk_size=1500 for performance)")
         
         yield {
             "status": "loading",
             "progress": 25,
-            "message": f"Loaded {chunk_count} document chunks"
+            "message": f"Loaded {chunk_count} document chunks (optimized size)"
         }
         
         yield {
@@ -564,9 +787,18 @@ async def extract_capability_model(
         if subvertical:
             extracted_data["subvertical"] = subvertical
         
+        # Step 6b: Enforce extraction depth by trimming data beyond the requested level
+        extracted_data = _enforce_depth(extracted_data, extraction_depth)
+        logger.info(f"[Extractor] Enforced depth '{extraction_depth}' on extracted data")
+        
         # Step 7: Save the extracted data
         final_path = write_json(output_path, extracted_data)
         logger.info(f"[Extractor] Saved extracted model to: {final_path}")
+        
+        # Step 8: Save to cache for future use
+        if file_hash and config_hash:
+            _save_extraction_to_cache(file_hash, config_hash, extracted_data)
+            logger.info("[CACHE] Saved extraction result to cache for future reuse")
         
         yield {
             "status": "success",
@@ -575,7 +807,8 @@ async def extract_capability_model(
             "data": extracted_data,
             "output_path": final_path,
             "chunks_path": chunks_output_path,
-            "chunk_count": chunk_count
+            "chunk_count": chunk_count,
+            "cached": False
         }
         
     except Exception as e:

@@ -1,6 +1,19 @@
 from neomodel import StructuredNode, RelationshipTo, RelationshipFrom, StringProperty, IntegerProperty
 
 
+class Vertical(StructuredNode):
+    uid = IntegerProperty(unique_index=True)
+    name = StringProperty(unique_index=True)
+    has_subvertical = RelationshipTo('SubVertical', 'HAS_SUBVERTICAL')
+
+
+class SubVertical(StructuredNode):
+    uid = IntegerProperty(unique_index=True)
+    name = StringProperty(unique_index=True)
+    belongs_to_vertical = RelationshipFrom('Vertical', 'HAS_SUBVERTICAL')
+    has_capability = RelationshipTo('Capability', 'HAS_CAPABILITY')
+
+
 class Capability(StructuredNode):
     uid = IntegerProperty(unique_index=True)
     name = StringProperty(unique_index=True)
@@ -9,6 +22,8 @@ class Capability(StructuredNode):
     subvertical = StringProperty()
     realized_by = RelationshipTo('Process', 'REALIZED_BY')
     accountable_for = RelationshipTo('OrganizationUnit', 'ACCOUNTABLE')
+    belongs_to_subvertical = RelationshipFrom('SubVertical', 'HAS_CAPABILITY')
+    has_chunk = RelationshipTo('Chunk', 'HAS_CHUNK')
 
 
 class Process(StructuredNode):
@@ -56,3 +71,13 @@ class ApplicationCatalog(StructuredNode):
     uid = IntegerProperty(unique_index=True)
     name = StringProperty(unique_index=True)
     supports = RelationshipFrom('Subprocess', 'SUPPORTED_BY')
+
+
+class Chunk(StructuredNode):
+    """Knowledge chunk node for RAG/semantic search"""
+    uid = IntegerProperty(unique_index=True)
+    text = StringProperty()
+    page = IntegerProperty()
+    source = StringProperty()
+    embedding = StringProperty()  # Store as JSON string or use ArrayProperty if available
+    has_chunk = RelationshipFrom('Capability', 'HAS_CHUNK')

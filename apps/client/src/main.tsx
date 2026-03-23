@@ -11,6 +11,7 @@ import CompassChat from './pages/compassChat';
 import CompassIngestion from './pages/compassIngestion';
 import Error from './pages/Error';
 import ResearchAgent from './pages/researchAgent';
+import ErrorBoundary from './components/ErrorBoundary';
 
 const router = createBrowserRouter([
   {
@@ -64,6 +65,8 @@ const router = createBrowserRouter([
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <ErrorBoundary>
+      <RouterProvider router={router} />
+    </ErrorBoundary>
   </StrictMode>,
 )

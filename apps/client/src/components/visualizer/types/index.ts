@@ -28,6 +28,6 @@ export interface EntityListItem {
   name: string
 }
 
-export type EntityType = 'Capability' | 'Process' | 'Subprocess' | 'DataEntity' | 'DataElements'
+export type EntityType = 'Capability' | 'Process' | 'Subprocess' | 'DataEntity' | 'DataElement' | 'OrgUnit' | 'ApplicationCatalog'
 
 export type Direction = 'outgoing' | 'incoming' | 'both'

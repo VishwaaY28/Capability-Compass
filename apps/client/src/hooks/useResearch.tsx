@@ -24,10 +24,13 @@ export function useResearch() {
 			if (!res.ok) throw new Error("Failed to fetch research results");
 			const data = await res.json();
 			console.log("[useResearch] Response data:", data);
-			console.log("[useResearch] Data length:", data.length);
-			console.log("[useResearch] Data types:", data.map((item: any) => item.type || "unknown"));
 			
-			setResults(data);
+			// Extract results array from response
+			const resultsArray = data.results || data || [];
+			console.log("[useResearch] Results array length:", resultsArray.length);
+			console.log("[useResearch] Results types:", resultsArray.map((item: any) => item.type || "unknown"));
+			
+			setResults(resultsArray);
 		} catch (err: any) {
 			console.error("[useResearch] Error:", err);
 			setError(err.message || "Unknown error");

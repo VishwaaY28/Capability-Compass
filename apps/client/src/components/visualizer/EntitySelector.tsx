@@ -10,12 +10,25 @@ interface EntitySelectorProps {
 }
 
 const ENTITY_TYPES: { value: EntityType; label: string }[] = [
-  { value: 'Capability', label: 'Capabilities' },
-  { value: 'Process', label: 'Processes' },
-  { value: 'Subprocess', label: 'Subprocesses' },
-  { value: 'DataEntity', label: 'Data Entities' },
-  { value: 'DataElements', label: 'Data Elements' },
+  { value: 'Capability',        label: 'Capabilities' },
+  { value: 'Process',           label: 'Processes' },
+  { value: 'Subprocess',        label: 'Subprocesses' },
+  { value: 'DataEntity',        label: 'Data Entities' },
+  { value: 'DataElement',       label: 'Data Elements' },
+  { value: 'OrgUnit',           label: 'Org Units' },
+  { value: 'ApplicationCatalog', label: 'Applications' },
 ]
+
+// Maps frontend EntityType to the slug the backend subtree router expects
+export const ENTITY_TYPE_SLUG: Record<EntityType, string> = {
+  Capability:         'capability',
+  Process:            'process',
+  Subprocess:         'subprocess',
+  DataEntity:         'dataentity',
+  DataElement:        'dataelement',
+  OrgUnit:            'orgunits',
+  ApplicationCatalog: 'applicationcatalog',
+}
 
 export default function EntitySelector({
   entityType, setEntityType, entities, selectedEntityId, setSelectedEntityId, loading,

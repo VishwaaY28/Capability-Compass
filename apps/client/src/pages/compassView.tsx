@@ -230,6 +230,15 @@ export default function CompassView() {
     try {
       setIsDownloading(true);
 
+      // Use filtered data (respects search) but not paginated (exports all filtered results)
+      const dataToExport = searchTerm.trim() ? filteredAndPaginatedData : flattenedData;
+
+      if (dataToExport.length === 0) {
+        toast.error('No data to export');
+        setIsDownloading(false);
+        return;
+      }
+
       // CSV headers
       const headers = [
         'Vertical',
@@ -249,19 +258,21 @@ export default function CompassView() {
       ];
 
       // Escape CSV values
-      const escapeCSV = (val: string) => {
+      const escapeCSV = (val: string | undefined | null) => {
         if (!val) return '';
-        if (val.includes(',') || val.includes('"') || val.includes('\n')) {
-          return `"${val.replace(/"/g, '""')}"`;
+        const strVal = String(val);
+        if (strVal.includes(',') || strVal.includes('"') || strVal.includes('\n')) {
+          return `"${strVal.replace(/"/g, '""')}"`;
         }
-        return val;
+        return strVal;
       };
 
       // Build CSV rows
-      const rows = flattenedData.map((row) => {
-        const dataElementsText = row.dataElements
-          .map((de: any) => `${de.name} (${de.entityName})`)
-          .join('; ');
+      const rows = dataToExport.map((row) => {
+        const dataElementsText = row.dataElements && row.dataElements.length > 0
+          ? row.dataElements.map((de: any) => `${de.name} (${de.entityName})`).join('; ')
+          : '';
+        
         return [
           escapeCSV(row.vertical),
           escapeCSV(row.subvertical),
@@ -283,8 +294,12 @@ export default function CompassView() {
       // Combine headers and rows
       const csv = [headers.join(','), ...rows].join('\n');
 
+      // Add BOM for proper Excel UTF-8 support
+      const BOM = '\uFEFF';
+      const csvWithBOM = BOM + csv;
+
       // Create blob and download
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const blob = new Blob([csvWithBOM], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -294,10 +309,10 @@ export default function CompassView() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      toast.success('CSV downloaded successfully');
+      toast.success(`CSV downloaded successfully (${dataToExport.length} rows)`);
     } catch (error) {
       console.error('Error downloading CSV:', error);
-      toast.error('Failed to download CSV');
+      toast.error(`Failed to download CSV: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsDownloading(false);
     }
@@ -348,7 +363,7 @@ export default function CompassView() {
               <button
                 className="px-4 py-2 rounded-md text-sm font-medium transition-colors bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 onClick={handleDownloadCSV}
-                disabled={isDownloading || filteredAndPaginatedData.length === 0}
+                disabled={isDownloading || flattenedData.length === 0}
                 title="Download table as CSV"
               >
                 <FiDownload size={18} />

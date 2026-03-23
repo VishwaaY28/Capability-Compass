@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   FiUpload,
   FiFile,
@@ -8,6 +8,7 @@ import {
   FiLoader,
 } from 'react-icons/fi';
 import toast, { Toaster } from 'react-hot-toast';
+import * as ExtractionManager from '../utils/extractionManager';
 
 interface ExtractedCapabilityModel {
   id?: number;
@@ -48,7 +49,7 @@ interface UploadedFile {
 }
 
 interface ExtractionEvent {
-  status: 'started' | 'loading' | 'extracting' | 'success' | 'error';
+  status: 'started' | 'cache_hit' | 'loading' | 'extracting' | 'success' | 'error';
   progress?: number;
   message?: string;
   data?: ExtractedCapabilityModel;
@@ -57,14 +58,29 @@ interface ExtractionEvent {
   filename?: string;
   error?: string;
   type?: string;
+  cached?: boolean;
+}
+
+const INGESTION_STORAGE_KEY = 'compass_ingestion_files';
+
+/** Serialisable subset of UploadedFile — we can't store the actual File object */
+type PersistedFile = Omit<UploadedFile, 'status'> & {
+  status: 'pending' | 'uploading' | 'extracting' | 'success' | 'error';
+};
+
+function loadPersistedFiles(): UploadedFile[] {
+  return ExtractionManager.loadPersistedFiles();
+}
+
+function saveFiles(files: UploadedFile[]) {
+  // Handled by ExtractionManager
 }
 
 const CompassIngestion: React.FC = () => {
-  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>(() => loadPersistedFiles());
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  // removed expanded collapse UI in favor of modal popup
   const [showModal, setShowModal] = useState<boolean>(false);
   const [modalData, setModalData] = useState<ExtractedCapabilityModel | null>(null);
   const [modalFileId, setModalFileId] = useState<string | null>(null);
@@ -74,7 +90,44 @@ const CompassIngestion: React.FC = () => {
   // Manual input fields
   const [manualVertical, setManualVertical] = useState<string>("");
   const [manualSubVertical, setManualSubVertical] = useState<string>("");
-  const [extractionDepth, setExtractionDepth] = useState<string>("data_element"); // capability, process, subprocess, data_entity, data_element
+  const [extractionDepth, setExtractionDepth] = useState<string>("data_element");
+
+  // Subscribe to extraction manager updates
+  useEffect(() => {
+    ExtractionManager.initializeFiles(files);
+    
+    const unsubscribe = ExtractionManager.subscribeToExtractions((updatedFiles, thinking) => {
+      setFiles(updatedFiles);
+      setIsThinking(thinking.isThinking);
+      setThinkingMessage(thinking.message);
+    });
+
+    // Check for pending modal data on mount (extraction completed while navigated away)
+    const checkPendingModal = () => {
+      const pending = ExtractionManager.getPendingModalData();
+      if (pending) {
+        setModalData(pending.data);
+        setModalFileId(pending.fileId);
+        setShowModal(true);
+        toast.success(`Extraction completed: ${pending.data.name}`);
+      }
+    };
+
+    // Check immediately
+    checkPendingModal();
+
+    // Also check periodically for any newly completed extractions
+    const interval = setInterval(() => {
+      if (ExtractionManager.hasPendingModal()) {
+        checkPendingModal();
+      }
+    }, 1000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
+  }, []);
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
@@ -123,35 +176,22 @@ const CompassIngestion: React.FC = () => {
         progress: 0,
       });
     });
-    setFiles((prev) => [...newFiles, ...prev]);
+    ExtractionManager.addFiles(newFiles);
     toast.success(`${newFiles.length} file(s) added`);
   };
 
   const removeFile = (id: string) => {
-    setFiles((prev) => prev.filter((f) => f.id !== id));
+    ExtractionManager.removeFile(id);
   };
 
   const removeAllFiles = () => {
-    setFiles([]);
+    ExtractionManager.clearAllFiles();
   };
 
-
-  /**
-   * Upload file and stream extraction results back from server
-   */
   const uploadAndExtractFile = async (file: UploadedFile) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === file.id ? { ...f, status: 'uploading', progress: 10 } : f
-      )
-    );
-
     const fileInputElement = fileInputRef.current;
     if (!fileInputElement || !fileInputElement.files) return;
 
-    const formData = new FormData();
-    
-    // Find the actual file from the input element
     let actualFile: File | null = null;
     for (const f of fileInputElement.files) {
       if (f.name === file.name && f.size === file.size) {
@@ -161,144 +201,19 @@ const CompassIngestion: React.FC = () => {
     }
     
     if (!actualFile) return;
-    
-    formData.append('file', actualFile);
-    
-    // Build URL with query parameters
-    const params = new URLSearchParams();
-    if (manualVertical.trim()) params.append('vertical', manualVertical.trim());
-    if (manualSubVertical.trim()) params.append('subvertical', manualSubVertical.trim());
-    params.append('extraction_depth', extractionDepth);
-    
-    const url = `/api/upload/pdf${params.toString() ? `?${params.toString()}` : ''}`;
-    
-    console.log('Upload request:', { vertical: manualVertical, subvertical: manualSubVertical, depth: extractionDepth, url });
 
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
+    await ExtractionManager.startExtraction(
+      file,
+      actualFile,
+      manualVertical,
+      manualSubVertical,
+      extractionDepth,
+      (data, fileId) => {
+        setModalData(data);
+        setModalFileId(fileId);
+        setShowModal(true);
+        toast.success(`Extraction successful: ${file.name}`);
       }
-
-      // Stream the JSONL response
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-
-        // Process complete lines
-        for (let i = 0; i < lines.length - 1; i++) {
-          if (lines[i].trim()) {
-            try {
-              const event: ExtractionEvent = JSON.parse(lines[i]);
-              handleExtractionEvent(file.id, event);
-                  // show agent thinking when extracting
-                  if (event.status === 'extracting') {
-                    setIsThinking(true);
-                    if (event.message) setThinkingMessage(event.message);
-                  }
-                  // when success open modal popup with the extracted data
-                  if (event.status === 'success' && event.data) {
-                    setIsThinking(false);
-                    setThinkingMessage('');
-                    setModalData(event.data);
-                    setModalFileId(file.id);
-                    setShowModal(true);
-                  }
-            } catch (e) {
-              console.error('Failed to parse event:', e);
-            }
-          }
-        }
-
-        // Keep incomplete line in buffer
-        buffer = lines[lines.length - 1];
-      }
-
-      // Process any remaining data
-      if (buffer.trim()) {
-        try {
-          const event: ExtractionEvent = JSON.parse(buffer);
-          handleExtractionEvent(file.id, event);
-        } catch (e) {
-          console.error('Failed to parse final event:', e);
-        }
-      }
-    } catch (error) {
-      console.error('Upload error:', error);
-      const errorMsg =
-        error instanceof Error ? error.message : 'Unknown error occurred';
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === file.id
-            ? { ...f, status: 'error', error: errorMsg }
-            : f
-        )
-      );
-      toast.error(`Upload failed: ${errorMsg}`);
-    }
-  };
-
-  const handleExtractionEvent = (
-    fileId: string,
-    event: ExtractionEvent
-  ) => {
-    setFiles((prev) =>
-      prev.map((f) => {
-        if (f.id !== fileId) return f;
-
-        switch (event.status) {
-          case 'started':
-            return { ...f, status: 'uploading', progress: 5 };
-
-          case 'loading':
-            return {
-              ...f,
-              status: 'extracting',
-              progress: Math.min(event.progress || 30, 50),
-            };
-
-          case 'extracting':
-            return {
-              ...f,
-              status: 'extracting',
-              progress: Math.min(event.progress || 60, 95),
-            };
-
-          case 'success':
-            if (event.data) {
-              toast.success(`Extraction successful: ${f.name}`);
-              // store the extracted data in file state; UI will show modal popup
-              return {
-                ...f,
-                status: 'success',
-                progress: 100,
-                extractedData: event.data,
-                chunks_path: event.chunks_path,
-              };
-            }
-            return f;
-
-          case 'error':
-            toast.error(`Extraction failed: ${event.error}`);
-            return { ...f, status: 'error', error: event.error };
-
-          default:
-            return f;
-        }
-      })
     );
   };
 
@@ -331,6 +246,8 @@ const CompassIngestion: React.FC = () => {
     }
 
     try {
+      toast.loading('Importing to graph database...', { id: 'import-toast' });
+      
       const response = await fetch('/api/upload/import-to-graph', {
         method: 'POST',
         headers: {
@@ -348,7 +265,13 @@ const CompassIngestion: React.FC = () => {
       }
 
       const result = await response.json();
-      toast.success('Successfully imported to graph database!');
+      
+      // Close the modal after successful import
+      setShowModal(false);
+      setModalData(null);
+      setModalFileId(null);
+      
+      toast.success('Successfully imported to graph database!', { id: 'import-toast' });
       
       // Show import summary
       const summary = result.summary;
@@ -362,7 +285,7 @@ const CompassIngestion: React.FC = () => {
     } catch (error) {
       const errorMsg =
         error instanceof Error ? error.message : 'Import failed';
-      toast.error(errorMsg);
+      toast.error(errorMsg, { id: 'import-toast' });
       console.error('Import error:', error);
     }
   };
@@ -463,7 +386,19 @@ const CompassIngestion: React.FC = () => {
                 {files.map((file) => (
                   <div
                     key={file.id}
-                    className="bg-gray-50 rounded border border-gray-200 p-2 hover:bg-gray-100 transition-colors text-xs"
+                    className={`bg-gray-50 rounded border border-gray-200 p-2 transition-colors text-xs ${
+                      file.status === 'success' && file.extractedData
+                        ? 'hover:bg-blue-50 cursor-pointer'
+                        : 'hover:bg-gray-100'
+                    }`}
+                    onClick={() => {
+                      // Allow clicking on successful extractions to view the modal again
+                      if (file.status === 'success' && file.extractedData) {
+                        setModalData(file.extractedData);
+                        setModalFileId(file.id);
+                        setShowModal(true);
+                      }
+                    }}
                   >
                     <div className="flex items-start justify-between gap-1 mb-1">
                       <div className="flex items-start gap-1 flex-1 min-w-0">
@@ -474,7 +409,10 @@ const CompassIngestion: React.FC = () => {
                         </div>
                       </div>
                       <button
-                        onClick={() => removeFile(file.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeFile(file.id);
+                        }}
                         className="text-gray-400 hover:text-gray-600 flex-shrink-0"
                       >
                         <FiX size={14} />
@@ -498,7 +436,7 @@ const CompassIngestion: React.FC = () => {
                       {file.status === 'success' && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">
                           <FiCheckCircle size={10} />
-                          Done
+                          Done (Click to view)
                         </span>
                       )}
                       {file.status === 'error' && (
@@ -627,7 +565,6 @@ const CompassIngestion: React.FC = () => {
                 <h3 className="text-lg font-semibold">Extracted Capability</h3>
                 <p className="text-sm text-gray-500">{modalData.name}</p>
               </div>
-              <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-800">Close</button>
             </div>
 
             <div className="space-y-3 text-sm text-gray-700">

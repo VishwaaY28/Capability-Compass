@@ -1,0 +1,47 @@
+{
+  "capabilities": [
+    {
+      "uid": 1,
+      "name": "Fund Mandate",
+      "organization_units": [
+        "Investment Strategy Team",
+        "Portfolio Management Team",
+        "Risk Management Team",
+        "Compliance Department",
+        "Legal & Regulatory Affairs",
+        "Investment Committee",
+        "Board of Directors"
+      ]
+    },
+    {
+      "uid": 2,
+      "name": "Fund Performance",
+      "organization_units": [
+        "Investment Strategy Team",
+        "Portfolio Management Team",
+        "Risk Management Team",
+        "Compliance Department",
+        "Research Department",
+        "Trading Desk",
+        "Middle Office",
+        "Operations/Settlement Department",
+        "Fund Accounting and Valuation Team",
+        "Client Reporting & Investor Relations",
+        "Investment Committee",
+        "Board of Directors"
+      ]
+    },
+    {
+      "uid": 3,
+      "name": "Performance Attribution",
+      "organization_units": [
+        "Performance Measurement Team",
+        "Portfolio Analytics Team",
+        "Risk Management Team",
+        "Compliance Department",
+        "Investment Committee",
+        "Audit and Governance Teams"
+      ]
+    }
+  ]
+}
