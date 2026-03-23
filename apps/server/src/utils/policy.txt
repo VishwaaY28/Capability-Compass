@@ -1,0 +1,121 @@
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+SCS
+Policy for Managing Reserve Talent across Global Competency, Verticals, Service Line Delivery and in
+Client engagements
+VERSION 2.0|7 Oct 2024
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page1of9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+1-Jun-2020 7 1-Feb-2021 7 - - | ate | Neon Prepared By Reviewed By Approved By Summary of Changes No. Malini Moorthy Vice President — HR Nasreen Kasture Asst Vice President- TMG Malini Moorthy Sr. Vice President — HR Nasreen Kasture Associate Vice President- TMG Tony Mohanty Global Head, TSC andL&D Tony Mohanty Global Head, TSC andL&D Senthil Nayagam.K Chief Learning Officer & Head RA Satyendu Mohanty Sr. Vice President — DA Senthil Nayagam.K Chief Learning Officer & Head RA Nasreen, Competency Leaders, HR ASDMss, VDHs, HRBPs, PMOs, Nasreen Ram. S Chief Operating Officer Dr. Vishwanath Joshi Chief People Officer Ram. S Chief Operating Officer Dr. Vishwanath Joshi Chief People Officer Vinod Chandran COO Vinod Chandran Coo New Guidelines Introduced for managing the bench process Changes in the terms. Revision to max duration in Reserve Talent Scope updated to include SL delivery Elaboration of 3 opportunities for deployment in projects Exclusions Miscellaneous Additionally included rules for managing Reserve Talent in vertical delivery pool, vertical competency, service line delivery and client engagements
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 2 of 9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+TABLE OF CONTENTS
+a a Policy Commencement & Validity P| eas P| Gerntesroaeomen een tnt ere
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 3 0f9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+SCS
+1. DEFINITION
+1.1. RESERVE TALENT
+Technical skilled consultant (outside of those in sales and marketing and support) who is not generating revenue for Hexaware is considered to be a Reserve Talent. This means the consultant is not being billed for their work/effort daily to customers of Hexaware. A technical consultant in Hexaware can be marked as reserve talent for various reasons
+A
+Deployable pool — They are not billed on any project ina client engagement but are available for deployment either in the global competency or in the vertical or in the service line.
+e
+Designated Non-billable (DNB) - They (Grade G9 and above) are designated as Non-Billable (DNB) due to the role/nature of work of the consultant for eg ASDMs, SDMs, Competency leaders etc. A list of baselined DNB consultants will be maintained by the TMG Head and consultants can be included in this list only after necessary justification and approval from the TMG Head
+e
+e Pipeline — They are currently not in a client project but are selected by an account. The start date is a few weeks away due to which such consultants are marked as earmarked for projects.
+e Investment/Internal projects - They are working for Internal/Investment projects of Hexaware for eg consultants in the GenAl Competency or in the Innovation Lab. Some of them may get partially billed to client projects as well.
+e Non-deployable pool - They are ona sabbatical or long leave due to medical or other reasons in the non-deployable pool
+e Unbilled in Accounts - They are working for a billable engagement with customer, however the consultant cannot be billed for a specific duration as they need training, knowledge transition or any other reason agreed with the customer like a contractual buffer in an engagement
+The reserve talent (outside of Sales & Marketing and G &A ) can be in Global competency, Vertical competency, Vertical delivery, Service line delivery, Internal/ Investment Projects and in Accounts/Projects as unbilled consultants.
+This document intends to cover the rules for managing the reserve talent highlighting the different scenarios as described above, after considering the specific nuances of each scenario to define the policy that best fits Hexaware’s and the consultants’ need and ensures that Hexaware can maximize the opportunity for consultants to help them get deployed and billed in the shortest possible timeframe.
+2. OBJECTIVE
+The objective of this policy is to outline our approach to
+a. Manage the Reserve Talent across global competency, vertical competency, vertical delivery, service line delivery and unbilled in Accounts.
+b. Improve utilization of consultants in projects and increase revenue for the organization
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 40f9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+C. Reduce turnaround time for fulfilling roject requirements
+d. Minimize external hiring by maximizing the deployment of internally available talent within
+the organization
+3. SCOPE
+These guidelines are applicable to all offshore consultants and nearshore consultants (India, Philippines, Sri Lanka, Mexico) in the Technical job stream as below:
+a. Lateral Tech Hires: After 90 days from the date of joining
+b. Mavericks hired for Technical Roles - After completion of the bond period (2 years from date of joining Hexaware)
+joining Hexaware)
+c. These guidelines are applicable only to those in the reserve talent pool in the competency (vertical or the global competencies) and those in the service line delivery.
+d. These guidelines are applicable to those deployed but unbilled in accounts with certain customized rules depending on the reason for being unbilled in accounts.
+Exclusions:
+a. Mavericks within the bond period
+b. Lateral Technical hires within 90 days of joining
+c. Consultants deployed and billed on a client project
+e. This policy does not apply to consultants who are undergoing performance improvement program or for consultants who have committed compliance violations , security violations or are undergoing any disciplinary action due to any reason. In these scenarios, the actions will be taken as per management discretion.
+f. This policy does not apply to consultants who are in projects that are approved as investment/Internal
+g. This policy does not apply to consultants who are part of the “Designated Non-billable” list in each competency or vertical or service line delivery.
+h. This policy does not apply to consultants who are in Non-Deployable pool as they are on Long leave/Maternity Leave/Sabbatical/LOP. The policy will be applicable once they return to work.
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 5 0f9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+4. POLICY FOR RESERVE TALENT
+4.1. The goal is to get the Reserve Talent in the global competency, vertical competency and service line delivery to be billed in a client project as soon as possible, max within the unbilled ageing threshold.
+4.2. This policy also intends to maximize the opportunity for billing for those consultants who are deployed on client projects but are shown as unbilled and ageing for more than 30 days in the account.
+4.3. Here are the granular details of the policy:
+Reserve Description Business rule for unbilled ageing threshold Remarks/ Talent pool Exceptions Deployable Not allocated to 1. GC Reserve Talent with 1. Mavericks pool projects in global (a) popular skills - 3 opportunities or max 60 days <2 years from competency (GC), ageing for popular skills DoJ to be vertical competency, | (b) niche skills — 3 opportunities or max 90 days excluded till vertical or service 2. Reserve Talent with popular skills in SL or Bond period line delivery (SL) Vertical delivery pool - 3 opportunities or max 30 expiry days for SL/vertical opportunities --> if not 2. Laterals deployed, release to GC Reserve Talent pool for with date of deployment against any open AR across SLs --> + joining less max of another 30 days --> if still not deployed, than 90 days release to HR for next steps from date on 3. Reserve Talent with niche skills in SL delivery Or which ageing Vertical Competency - 3 opportunities or max 90 is checked days --> if not deployed, release to HR for next steps Designated ASDM, Delivery Included in utilization but no unbilled ageing rules Non Billable Managers (G9+), are applicable to this cohort due to their role/ (DNB) Competency mgmt nature of work 3 Pipeline Shortlisted Earmarked pool ageing threshold: consultants but 1. For NN - 6 weeks and then redeploy for other ARs awaiting future 2. EN - 3 weeks and then redeploy for other ARs. project allocation Unbilled ageing continues in the earmarked pool Investment/ Gen Al Comp, Being an investment, there is no threshold for Internal Innovation Lab, unbilled ageing until any decision is changed by the projects Competency Solution | management. etc 5 Non- Sabbatical, ML, LOP, No thresholds for unbilled ageing - unbilled ageing [este [tongteae | tobevesstatter these constants joiner Unbilled in T &B unbilled 1. Waiting to start/ Buffer - ageing 30+7 days--> Accounts reasons: Waiting to available to TMG/GC to redeploy in other accounts Start, Training, 2. Training - ageing > 45 days --> available to Transition, FPP TMG/GC to redeploy overrun, Committed | 3. Transition - part of account utilization. Ageing buffer, Billing cap etc | monitored as per Transition plan 4. FPP Overrun and Billing cap — no ageing threshold
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 6 of 9
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+5. Committed buffer - no ageing threshold but should be G3 and below
+5. GUIDELINES COMMENCEMENT AND VALIDITY
+These guidelines come into effect from 7-October, 2024. The following changes will be applicable consultants who start as reserve talent period from this date onward.
+6. GENERAL GUIDELINES
+6.1. While the TMG, service line delivery vertical delivery and the competency teams will work with the consultant to identify new opportunities for deployment, it is expected that the consultant will take all necessary steps to upskill / reskill themselves and thus broaden their skills and become relevant to the technical skill requirements in the demand seen in the existing projects or the new projects in the pipeline.
+6.2. During this period all the consultants are expected to focus on professional skill development using organizational programs like Sonic, Ignite, Challenger, Hexavarsity’s training programs like Jumpstart, Client specific training programs etc and/ or contribute to any projects assigned to them by the competency managers.
+6.3. The information about the relevant opportunities based on skills / experience / TSR will be made available to the consultant. The consultant is expected to prepare and be flexible to get selected for these opportunities.
+6.4. Incase a consultant does not accept / get selected for the relevant opportunities it will limit the options for re-deployment.
+6.5. During this period a consultant must adhere to all organizational policies and processes including code of conduct, information security obligations, attendance, leave, time sheets and any specific expectations communicated from time to time.
+To ensure availability for interviews related to opportunities, consultants are requested not to avail leave during this period (unless for personal exigencies) and are expected to physically work from office locations (Work from Home is not encouraged, unless consultant has prior approval from the competency/vertical/ service line delivery managers).
+6.6.
+6.7. It is expected that all consultants who are in Reserve talent pool will endeavor to get allocated to © Hexaware Technologies Limited. Ver 2.0 Page 7 of 9
+For Internal Use only
+for
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+projects as early as possible and not later than two months ays
+6.8. Post the completion of the unbilled ageing threshold (60 days for popular skills and 90 days for Niche skills), further actions will be discussed by the respective competency or service line delivery and HR planned mutually as per guidelines and will be communicated by the competency managers/ service line delivery managers/HR.
+6.9. All consultants who were in Reserve talent pool in the competency prior to 7th-Oct-2024 will continue with the previous policy guideline and have up to 3 months (90 days) to get deployed on their next project. After which they will receive specific communication by the competencies / HR on the way ahead. All consultants who get to be in Reserve talent pool on or after 7th-Oct-2024 will have up to 2/3 months (60 days for popular skills and 90 days for Niche skills) to get deployed on the next project.
+6.10. The list of popular and niche skills are at the discretion of the respective competency leader of the vertical, GC or the service line.
+6.11. The consultants who are in Reserve Talent pool can opt to get an early release subject to Management’s Approval.
+6.12. A consultant in any reserve talent pool is deemed to have squandered an opportunity under any of the following scenarios:
+a) Rejection by the Delivery team for a project opportunity after a discussion/ interview
+b) Rejection by the Client for a project opportunity after an interview by the client
+c) Consultant disagrees to take up an opportunity due to shift timings
+d) Consultant disagrees to take up an opportunity that involves relocation intra-city or inter-city
+e) Any other scenario where the consultant’s skills are a good fit but the consultant demonstrates a lack willingness to get deployed in that project
+7. Exception Handling
+Management reserves the right to make any amendments to the guidelines or use its own judgement in certain scenarios, consider earmarked pool for NN accounts rampup as an exception or withdraw this policy at any time, with appropriate communication.
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 8 of 9
+of
+HEXAWARE
+POLICY FOR MANAGING RESERVE TALENT
+8. Annexure — Indicative list of niche skills:
+ServiceNow, DevOps, ELK Automation Cloud Native Developers (Java, .Net), SOA Integration (Mulesoft, DelBhomi, Apigee, Workato), Assembler, AS400, GoLang C# + Selenium, API Automation, ETL Automation with Python Scripting Appian, AEM, MS Platforms (MSD+PowerPlatform+SharePoint), Commerce Tools and Magento ADF, Data bricks, Pyspark, Informatica MDM, Snowflake, Informatica DQ, Profisee Glue, AWS-RedShift, GCP-Big query, Collibra Workday -HCM, SAP Cloud - SCM & Fin, Oracle Cloud - SCM & Fin Vertical Product experts like Guidewire, BackBase etc (not trained), domain experts Competency
+© Hexaware Technologies Limited. For Internal Use only
+Ver 2.0
+Page 9 of 9

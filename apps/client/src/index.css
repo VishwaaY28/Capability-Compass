@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  @apply box-border;
+}
+
+.select-text {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+  -ms-user-select: text !important;
+}
+
+.select-none {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+/* Make markdown content display well in cards */
+.prose-sm h1,
+.prose-sm h2,
+.prose-sm h3 {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose-sm h1 {
+  font-size: 1.5em;
+}
+
+.prose-sm h2 {
+  font-size: 1.25em;
+}
+
+.prose-sm h3 {
+  font-size: 1.15em;
+}
+
+.prose-sm ul,
+.prose-sm ol {
+  padding-left: 1.2em;
+}
+
+.prose-sm p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+/* Fix line-clamp with markdown */
+.line-clamp-2.prose p,
+.line-clamp-2.prose ul,
+.line-clamp-2.prose ol,
+.line-clamp-2.prose h1,
+.line-clamp-2.prose h2,
+.line-clamp-2.prose h3,
+.line-clamp-4.prose p,
+.line-clamp-4.prose ul,
+.line-clamp-4.prose ol,
+.line-clamp-4.prose h1,
+.line-clamp-4.prose h2,
+.line-clamp-4.prose h3,
+.line-clamp-6.prose p,
+.line-clamp-6.prose ul,
+.line-clamp-6.prose ol,
+.line-clamp-6.prose h1,
+.line-clamp-6.prose h2,
+.line-clamp-6.prose h3 {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+/* Ensure markdown elements in line-clamp-2 show properly */
+.line-clamp-2.prose h1,
+.line-clamp-2.prose h2,
+.line-clamp-2.prose h3 {
+  font-size: inherit;
+  font-weight: 600;
+  display: inline;
+}
+
+.line-clamp-2.prose ul,
+.line-clamp-2.prose ol {
+  display: inline;
+  list-style: none;
+  padding-left: 0;
+}
+
+.line-clamp-2.prose li {
+  display: inline;
+}
+
+.line-clamp-2.prose li:after {
+  content: ', ';
+}
