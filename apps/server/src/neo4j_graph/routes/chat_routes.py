@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from utils.llm_logger import log_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,18 @@ async def log_dual_chat(payload: DualChatLogRequest):
             user_prompt=payload.query,
             status="success"
         )
+        
+        # Also log to CSV
+        try:
+            log_llm_call(
+                vertical=payload.vertical or "",
+                user_query=payload.query,
+                user_prompt=f"Vertical: {payload.vertical}\n\nQuery: {payload.query}",
+                llm_response_compass="Dual chat comparison logged",
+                request_id=f"dual_chat_{payload.vertical}_{payload.query[:50]}"
+            )
+        except Exception as csv_log_err:
+            logger.warning(f"Failed to log dual chat to CSV: {csv_log_err}")
         
         logger.info(f"Logged dual chat comparison for query: {payload.query[:50]}...")
         

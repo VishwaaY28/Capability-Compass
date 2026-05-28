@@ -33,13 +33,15 @@ export default function NodeDetails({ selectedNode, onClose, loading = false }: 
   return (
     <div className={`node-details ${isCollapsed ? 'collapsed' : ''}`}>
       <div className="node-details-header">
-        <button className="collapse-btn" onClick={() => setIsCollapsed(!isCollapsed)} title={isCollapsed ? 'Expand' : 'Collapse'}>
-          {isCollapsed ? '◀' : '▶'}
-        </button>
+
+        {/*<button className="collapse-btn" onClick={() => setIsCollapsed(!isCollapsed)} title={isCollapsed ? 'Expand' : 'Collapse'}>*/}
+        {/*  {isCollapsed ? '◀' : '▶'}*/}
+        {/*</button>*/}
         {!isCollapsed && (
           <>
             <div className="header-content">
               <h3>{selectedNode.label}</h3>
+                <button className="close-btn" onClick={onClose}>&times;</button>
               {selectedNode.path && selectedNode.path.length > 0 && (
                 <div className="node-path">
                   {[...selectedNode.path].reverse().map((node, index) => (
@@ -54,7 +56,6 @@ export default function NodeDetails({ selectedNode, onClose, loading = false }: 
                 </div>
               )}
             </div>
-            <button className="close-btn" onClick={onClose}>&times;</button>
           </>
         )}
       </div>

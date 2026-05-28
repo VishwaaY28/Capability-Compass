@@ -9,7 +9,7 @@
 .viz-app .app-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: 0.5rem;
   padding: 0.75rem 1rem;
   background: #ffffff;
   border-bottom: 1px solid #D5D6D8;
@@ -17,7 +17,7 @@
 
 .viz-app .entity-selector {
   display: flex;
-  gap: 1rem;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
 

@@ -505,7 +505,6 @@ class AzureOpenAIThinkingClient:
             
             logger.info(f"[KNOWLEDGE RETRIEVAL] Using initialized retriever: {self._knowledge_retriever}")
             
-            # Retrieve chunks using the query with vector similarity
             logger.info(f"[KNOWLEDGE RETRIEVAL] Retrieving knowledge chunks for query: {query[:50]}...")
             try:
                 logger.info(f"[KNOWLEDGE RETRIEVAL] About to call get_search_results on retriever: {self._knowledge_retriever}")
@@ -1032,10 +1031,10 @@ Provide both your thinking process and final analysis."""
                     for name in names:
                         if name and name in q:
                             if "data" in col.lower() or "element" in col.lower():
-                                return "Investment Analyst", 3
+                                return "Investment Analyst", 4
                             if "capability" in col.lower():
-                                return "portfolio manager", 2
-                            return "portfolio manager", 2
+                                return "portfolio manager", 3
+                            return "portfolio manager", 3
         except Exception:
             pass
 
@@ -1579,19 +1578,19 @@ You are an expert Enterprise Architecture Consultant for the Capital Markets Vir
 ### OPERATIONAL GUARDRAILS (THE NORTH STAR)
 1. GROUNDING: Use ONLY the provided 'RETRIEVED CONTEXT'. If a relationship or entity is not in the graph, state: "Information not available in the current enterprise model."
 2. NO FABRICATION: Do not invent processes, IDs, or lineage.
-3. LINEAGE ADHERENCE: Follow the hierarchy: Capability -> Process -> Sub-process -> Data Entity.
+3. LINEAGE ADHERENCE: Follow the hierarchy: Capability -> Process -> Sub-process -> Data Entity -> Data elements.
 4. CITATION: Reference specific entities from the context (e.g., "Per the [Process Name]...") to maintain integrity.
+5. Dont include UID's in your response.
  
 ### PERSONA GUIDELINES
 - EXECUTIVE: "Bottom Line Up Front." Focus on business value and high-level capabilities.
 - portfolio manager: Focus on the "How." Detail process relationships, workflows, and dependencies.
-- Investment Analyst: Maximum fidelity. Include technical IDs, Data Element definitions, and exhaustive lineage mapping.
+- Investment Analyst: Maximum fidelity. Include Data Element definitions, and exhaustive lineage mapping.
  
 ### RESPONSE STRUCTURE
 1. Give your thinking inside the thinking tag: <thinking> [Your step-by-step reasoning process - reference external sources] </thinking>
-2. TARGET ENTITY: [Target Entity: Name]
-3. ANALYSIS: Map the query to the meta-model and justify your response "altitude" based on the Persona.
-4. TAILORED RESPONSE: The persona-specific synthesis.
+2. ANALYSIS: Map the query to the meta-model and justify your response "altitude" based on the Persona.
+3. TAILORED RESPONSE: The persona-specific descriptive synthesis.
 """
         return system_message
 
@@ -1663,10 +1662,12 @@ You are an expert Enterprise Architecture Consultant for the Capital Markets Vir
             keywords = [
                 k.strip() for k in keywords_text.split(",")
             ]
+            print("query keywords:",keywords)
             return keywords[:max_keywords]
 
         except Exception as e:
             logger.error(f"Error extracting keywords: {e}")
+            print('not using keyword logic')
             return []
 
 

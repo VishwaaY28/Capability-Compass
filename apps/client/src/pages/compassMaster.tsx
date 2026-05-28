@@ -5,34 +5,6 @@ import { Toaster, toast } from 'react-hot-toast'
 
 import { useCapabilityApi } from '../hooks/useCapability';
 import type { Capability, Process, Vertical, SubVertical } from '../hooks/useCapability';
-import favicon from '../assets/favicon.png';
-
-// Domain to Sub-Vertical mapping
-const DOMAIN_SUBVERTICAL_MAP: Record<string, string[]> = {
-  'Capital Markets': [
-    'Investment banking',
-    'Wealth management',
-    'Asset management',
-    'Private equity',
-    'Market infrastructure',
-    'Asset services, Custodians',
-    'Others',
-  ],
-  'International Financial Institution (IFI)': [
-    'Multilateral Development Bank (MDB)',
-    'Development Finance Institution',
-    'Nondepository Credit Intermediation',
-  ],
-  'US Federal Government': [
-    'Federal agencies',
-  ],
-  'Banking': [
-    'Retail banking',
-    'Investment banking',
-    'Corporate banking',
-    'Wealth management',
-  ],
-};
 
 const SYSTEM_PROMPT = `You are a Senior Enterprise Architect and Process Subject Matter Expert (SME) in the **{domain}** domain, specializing in classifying business capabilities.
 

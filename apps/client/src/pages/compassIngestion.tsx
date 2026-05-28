@@ -585,15 +585,65 @@ const CompassIngestion: React.FC = () => {
 
               <div>
                 <p className="font-semibold mb-2">Processes ({modalData.processes.length})</p>
-                <div className="space-y-2 max-h-60 overflow-y-auto">
+                <div className="space-y-2 max-h-96 overflow-y-auto">
                   {modalData.processes.map((proc, idx) => (
-                    <div key={idx} className="p-2 border rounded">
+                    <div key={idx} className="p-2 border rounded bg-gray-50">
                       <div className="flex items-center justify-between">
                         <p className="font-medium">{proc.name}</p>
                         <p className="text-xs text-gray-500">{proc.level}</p>
                       </div>
                       <p className="text-xs text-gray-600 mt-1">{proc.description}</p>
-                      <p className="text-xs text-gray-500 mt-1">{(proc.subprocesses || []).length} subprocesses</p>
+                      
+                      {/* Subprocesses section */}
+                      {(proc.subprocesses || []).length > 0 && (
+                        <div className="mt-2 ml-2 border-l-2 border-gray-300 pl-2">
+                          <p className="text-xs font-medium text-gray-700 mb-1">
+                            Subprocesses ({proc.subprocesses.length})
+                          </p>
+                          <div className="space-y-1">
+                            {proc.subprocesses.map((subproc: any, subIdx: number) => (
+                              <div key={subIdx} className="p-1.5 bg-white border border-gray-200 rounded text-xs">
+                                <p className="font-medium text-gray-800">{subproc.name}</p>
+                                <p className="text-gray-600 mt-0.5">{subproc.description}</p>
+                                
+                                {/* Data Entities section */}
+                                {(subproc.data_entities || []).length > 0 && (
+                                  <div className="mt-1 ml-1 border-l border-gray-300 pl-1">
+                                    <p className="text-xs font-medium text-gray-600 mb-0.5">
+                                      Data Entities ({subproc.data_entities.length})
+                                    </p>
+                                    <div className="space-y-0.5">
+                                      {subproc.data_entities.map((dataEnt: any, deIdx: number) => (
+                                        <div key={deIdx} className="bg-blue-50 p-0.5 rounded text-xs">
+                                          <p className="font-medium text-blue-800">{dataEnt.data_entity_name}</p>
+                                          <p className="text-blue-700 text-xs">{dataEnt.data_entity_description}</p>
+                                          
+                                          {/* Data Elements section */}
+                                          {(dataEnt.data_elements || []).length > 0 && (
+                                            <div className="mt-0.5 ml-0.5 border-l border-blue-300 pl-0.5">
+                                              <p className="text-xs text-blue-600 font-medium mb-0.5">
+                                                Elements ({dataEnt.data_elements.length})
+                                              </p>
+                                              <div className="space-y-0.5">
+                                                {dataEnt.data_elements.map((dataElem: any, delemIdx: number) => (
+                                                  <div key={delemIdx} className="bg-blue-100 p-0.5 rounded text-xs text-blue-800">
+                                                    <p className="font-medium">{dataElem.data_element_name}</p>
+                                                    <p className="text-blue-700 text-xs">{dataElem.data_element_description}</p>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

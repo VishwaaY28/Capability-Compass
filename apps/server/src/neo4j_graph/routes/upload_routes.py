@@ -170,6 +170,8 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
         "capabilities_created": 0,
         "processes_created": 0,
         "subprocesses_created": 0,
+        "data_entities_created": 0,
+        "data_elements_created": 0,
         "chunks_imported": 0
     }
     
@@ -256,7 +258,7 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
             finally:
                 svc.close()
             
-            # Prepare subprocesses with UIDs
+            # Prepare subprocesses with UIDs and data entities
             subprocesses_data = []
             subprocesses = proc_data.get("subprocesses", [])
             for sub_idx, subproc_data in enumerate(subprocesses):
@@ -270,14 +272,56 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
                 finally:
                     svc.close()
                 
+                # Prepare data entities with UIDs
+                data_entities_data = []
+                data_entities = subproc_data.get("data_entities", [])
+                for de_idx, de_data in enumerate(data_entities):
+                    # Get next UID for data entity
+                    query = "MATCH (de:DataEntity) RETURN max(de.uid) AS max_uid"
+                    svc = Neo4jQueryService()
+                    try:
+                        results = svc.execute_cypher(query)
+                        max_uid = results[0]["max_uid"] if results and results[0]["max_uid"] else 0
+                        de_uid = max_uid + 1 + de_idx
+                    finally:
+                        svc.close()
+                    
+                    # Prepare data elements with UIDs
+                    data_elements_data = []
+                    data_elements = de_data.get("data_elements", [])
+                    for elem_idx, elem_data in enumerate(data_elements):
+                        # Get next UID for data element
+                        query = "MATCH (elem:DataElements) RETURN max(elem.uid) AS max_uid"
+                        svc = Neo4jQueryService()
+                        try:
+                            results = svc.execute_cypher(query)
+                            max_uid = results[0]["max_uid"] if results and results[0]["max_uid"] else 0
+                            elem_uid = max_uid + 1 + elem_idx
+                        finally:
+                            svc.close()
+                        
+                        data_elements_data.append({
+                            "uid": elem_uid,
+                            "name": elem_data.get("data_element_name", elem_data.get("name", "")),
+                            "description": elem_data.get("data_element_description", elem_data.get("description", ""))
+                        })
+                    
+                    data_entities_data.append({
+                        "uid": de_uid,
+                        "name": de_data.get("data_entity_name", de_data.get("name", "")),
+                        "description": de_data.get("data_entity_description", de_data.get("description", "")),
+                        "data_elements": data_elements_data if data_elements_data else []
+                    })
+                
                 subprocesses_data.append({
                     "uid": sub_uid,
                     "name": subproc_data.get("name"),
                     "description": subproc_data.get("description", ""),
-                    "category": subproc_data.get("category")
+                    "category": subproc_data.get("category"),
+                    "data_entities": data_entities_data if data_entities_data else []
                 })
             
-            # Create process with subprocesses
+            # Create process with subprocesses and data entities
             process = ProcessService.create_process(
                 name=proc_data.get("name"),
                 level=proc_data.get("level", "core"),
@@ -289,6 +333,13 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
             )
             stats["processes_created"] += 1
             stats["subprocesses_created"] += len(subprocesses_data)
+            
+            # Count data entities and elements created
+            for sp in subprocesses_data:
+                for de in sp.get("data_entities", []):
+                    stats["data_entities_created"] = stats.get("data_entities_created", 0) + 1
+                    stats["data_elements_created"] = stats.get("data_elements_created", 0) + len(de.get("data_elements", []))
+            
             logger.info(f"Created process: {process.get('name')} (UID: {process.get('uid')}) with {len(subprocesses_data)} subprocesses")
         
         # Step 5: Import document chunks as Chunk nodes (for RAG/knowledge retrieval)
@@ -417,7 +468,7 @@ async def upload_csv(
         
         # Read CSV content
         content = await file.read()
-        csv_text = content.decode('utf-8-sig')  # Handle BOM if present
+        csv_text = content.decode('cp1252')  # Handle BOM if present
         
         logger.info(f"Processing CSV file: {file.filename} (batch mode: {use_batch})")
         
