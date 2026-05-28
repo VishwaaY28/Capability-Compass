@@ -21,11 +21,15 @@ export default function ResearchAgent() {
     if (query.trim()) research(query);
   };
 
+  // Default to expanded (true) when not yet toggled, since we now only return one result.
+  const isCapOpen = (id: number) => expandedCaps[id] !== false;
+  const isProcOpen = (id: number) => expandedProcs[id] !== false;
+
   const toggleCap = (id: number) =>
-    setExpandedCaps(prev => ({ ...prev, [id]: !prev[id] }));
+    setExpandedCaps(prev => ({ ...prev, [id]: prev[id] === false ? true : false }));
 
   const toggleProc = (id: number) =>
-    setExpandedProcs(prev => ({ ...prev, [id]: !prev[id] }));
+    setExpandedProcs(prev => ({ ...prev, [id]: prev[id] === false ? true : false }));
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -100,7 +104,7 @@ export default function ResearchAgent() {
               </div>
               <ul className="space-y-4">
                 {results.map((cap: any) => {
-                  const isCapExpanded = expandedCaps[cap.id];
+                  const isCapExpanded = isCapOpen(cap.id);
                   const processes: any[] = cap.processes || [];
 
                   return (
@@ -145,7 +149,7 @@ export default function ResearchAgent() {
                           ) : (
                             <div className="space-y-3">
                               {processes.map((proc: any) => {
-                                const isProcExpanded = expandedProcs[proc.id];
+                                const isProcExpanded = isProcOpen(proc.id);
                                 const subprocesses: any[] = proc.subprocesses || [];
 
                                 return (
@@ -199,11 +203,53 @@ export default function ResearchAgent() {
                                                     <p className="text-xs text-gray-500 mt-1">{sp.description}</p>
                                                   )}
                                                   {dataEntities.length > 0 && (
-                                                    <div className="mt-2 pt-2 border-t border-indigo-200">
-                                                      <p className="text-xs font-semibold text-gray-600 mb-1">Data Entities:</p>
-                                                      <p className="text-xs text-gray-500">
-                                                        {dataEntities.map((de: any) => de.data_entity_name).join(", ")}
+                                                    <div className="mt-2 pt-2 border-t border-indigo-200 space-y-2">
+                                                      <p className="text-xs font-semibold text-gray-600">
+                                                        Data Entities ({dataEntities.length}):
                                                       </p>
+                                                      <ul className="space-y-2">
+                                                        {dataEntities.map((de: any) => {
+                                                          const dataElements: any[] = de.data_elements || [];
+                                                          return (
+                                                            <li
+                                                              key={de.data_entity_id}
+                                                              className="bg-white border border-indigo-200 rounded-md px-3 py-2"
+                                                            >
+                                                              <div className="flex items-center gap-2 flex-wrap">
+                                                                <span className="font-semibold text-xs text-gray-800">
+                                                                  {de.data_entity_name}
+                                                                </span>
+                                                                <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-700">
+                                                                  {dataElements.length} element{dataElements.length !== 1 ? "s" : ""}
+                                                                </span>
+                                                              </div>
+                                                              {de.data_entity_description && (
+                                                                <p className="text-[11px] text-gray-500 mt-1">
+                                                                  {de.data_entity_description}
+                                                                </p>
+                                                              )}
+                                                              {dataElements.length > 0 && (
+                                                                <div className="mt-2 pt-2 border-t border-gray-100">
+                                                                  <p className="text-[11px] font-semibold text-gray-600 mb-1">
+                                                                    Data Elements:
+                                                                  </p>
+                                                                  <ul className="flex flex-wrap gap-1.5">
+                                                                    {dataElements.map((el: any) => (
+                                                                      <li
+                                                                        key={el.data_element_id}
+                                                                        className="px-2 py-0.5 rounded-md text-[11px] bg-amber-50 text-amber-800 border border-amber-100"
+                                                                        title={el.data_element_description || ""}
+                                                                      >
+                                                                        {el.data_element_name}
+                                                                      </li>
+                                                                    ))}
+                                                                  </ul>
+                                                                </div>
+                                                              )}
+                                                            </li>
+                                                          );
+                                                        })}
+                                                      </ul>
                                                     </div>
                                                   )}
                                                 </div>

@@ -117,7 +117,38 @@ class ProcessService:
     @staticmethod
     def create_process(name: str, level: str, description: str, uid: int, 
                       capability_id: int, category: str = None, subprocesses: list = None):
-        """Create a new process"""
+        """
+        Create a new process with subprocesses and data entities/elements.
+        
+        Args:
+            name: Process name
+            level: Process level
+            description: Process description
+            uid: Process UID
+            capability_id: Parent capability UID
+            category: Process category
+            subprocesses: List of subprocess dicts with optional data_entities:
+                [{
+                    "uid": int,
+                    "name": str,
+                    "description": str,
+                    "category": str,
+                    "data_entities": [
+                        {
+                            "uid": int,
+                            "name": str,
+                            "description": str,
+                            "data_elements": [
+                                {
+                                    "uid": int,
+                                    "name": str,
+                                    "description": str
+                                }
+                            ]
+                        }
+                    ]
+                }]
+        """
         query = """
         MATCH (c:Capability {uid: $capability_uid})
         CREATE (p:Process {uid: $uid, name: $name, level: $level, 
@@ -160,6 +191,44 @@ class ProcessService:
                         "category": sp_data.get("category")
                     }
                     svc.execute_cypher(sp_query, sp_params)
+                    
+                    # Create data entities for this subprocess if provided
+                    data_entities = sp_data.get("data_entities", [])
+                    if data_entities:
+                        for de_data in data_entities:
+                            de_query = """
+                            MATCH (sp:Subprocess {uid: $subprocess_uid})
+                            CREATE (de:DataEntity {uid: $de_uid, name: $de_name, 
+                                                   data_entity_description: $de_description})
+                            CREATE (sp)-[:USES_DATA]->(de)
+                            RETURN de.uid AS uid, de.name AS name
+                            """
+                            de_params = {
+                                "subprocess_uid": sp_data.get("uid"),
+                                "de_uid": de_data.get("uid"),
+                                "de_name": de_data.get("name"),
+                                "de_description": de_data.get("description", "")
+                            }
+                            de_result = svc.execute_cypher(de_query, de_params)
+                            
+                            # Create data elements for this data entity if provided
+                            data_elements = de_data.get("data_elements", [])
+                            if data_elements:
+                                for elem_data in data_elements:
+                                    elem_query = """
+                                    MATCH (de:DataEntity {uid: $de_uid})
+                                    CREATE (elem:DataElements {uid: $elem_uid, name: $elem_name,
+                                                               data_element_description: $elem_description})
+                                    CREATE (de)-[:HAS_ELEMENT]->(elem)
+                                    RETURN elem.uid AS uid, elem.name AS name
+                                    """
+                                    elem_params = {
+                                        "de_uid": de_data.get("uid"),
+                                        "elem_uid": elem_data.get("uid"),
+                                        "elem_name": elem_data.get("name"),
+                                        "elem_description": elem_data.get("description", "")
+                                    }
+                                    svc.execute_cypher(elem_query, elem_params)
             
             return process
         finally:

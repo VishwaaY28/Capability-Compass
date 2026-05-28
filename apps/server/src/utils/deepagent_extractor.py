@@ -21,6 +21,7 @@ from datetime import datetime
 from deepagents import create_deep_agent
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from unstructured import partition
 from langchain_openai import AzureChatOpenAI
 from langchain_core.callbacks.base import BaseCallbackHandler
 from openai import AzureOpenAI
@@ -217,11 +218,11 @@ def load_document(path: str, chunk_size: int = 1500, chunk_overlap: int = 100) -
 
 def write_json(path: str, data: dict) -> str:
     """
-    Write data to a JSON file with timestamp suffix to avoid overwrites.
+    Write data to a JSON file using capability name if available, otherwise use generic name.
     
     Args:
         path: Target file path
-        data: Dictionary to write
+        data: Dictionary to write (capability model with 'name' field)
 
     Returns:
         Actual path where file was written
@@ -229,14 +230,17 @@ def write_json(path: str, data: dict) -> str:
     abs_target = Path(path).expanduser().resolve()
     abs_target.parent.mkdir(parents=True, exist_ok=True)
     
-    base = abs_target.stem if abs_target.suffix else abs_target.name
-    ext = abs_target.suffix if abs_target.suffix else ".json"
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    candidate = abs_target.with_name(f"{base}_{ts}{ext}")
+    # Use capability name if available in data, otherwise use default
+    capability_name = data.get("name", "extracted_capability_model")
+    # Sanitize capability name to be filesystem-safe
+    safe_name = "".join(c if c.isalnum() or c in ('-', '_', ' ') else '_' for c in capability_name).strip()
     
+    candidate = abs_target.with_name(f"{safe_name}.json")
+    
+    # If file already exists, add a counter
     counter = 2
     while candidate.exists():
-        candidate = abs_target.with_name(f"{base}_{ts}_{counter}{ext}")
+        candidate = abs_target.with_name(f"{safe_name}_{counter}.json")
         counter += 1
         
     with candidate.open("w", encoding="utf-8") as f:
@@ -261,13 +265,13 @@ def save_document_chunks(chunks: List[Dict], filename: str, chunks_dir: str = "d
     chunks_path = Path(chunks_dir)
     chunks_path.mkdir(parents=True, exist_ok=True)
     
-    base = filename
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    candidate = chunks_path / f"{base}_chunks_{ts}.json"
+    # Use the filename as-is for meaningful chunk filenames
+    candidate = chunks_path / f"{filename}_chunks.json"
     
+    # If file already exists, add a counter
     counter = 2
     while candidate.exists():
-        candidate = chunks_path / f"{base}_chunks_{ts}_{counter}.json"
+        candidate = chunks_path / f"{filename}_chunks_{counter}.json"
         counter += 1
     
     chunks_data = {
@@ -795,7 +799,13 @@ async def extract_capability_model(
         final_path = write_json(output_path, extracted_data)
         logger.info(f"[Extractor] Saved extracted model to: {final_path}")
         
-        # Step 8: Save to cache for future use
+        # Step 8: Re-save chunks with the actual capability name now that we have it
+        capability_name = extracted_data.get("name", "capability")
+        safe_capability_name = "".join(c if c.isalnum() or c in ('-', '_', ' ') else '_' for c in capability_name).strip()
+        chunks_output_path = save_document_chunks(chunks, safe_capability_name)
+        logger.info(f"[Extractor] Re-saved chunks with capability name to: {chunks_output_path}")
+        
+        # Step 9: Save to cache for future use
         if file_hash and config_hash:
             _save_extraction_to_cache(file_hash, config_hash, extracted_data)
             logger.info("[CACHE] Saved extraction result to cache for future reuse")
