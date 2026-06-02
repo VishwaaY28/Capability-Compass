@@ -64,23 +64,41 @@ def _on_startup_initialize_azure_clients():
 
 @app.on_event("startup")
 def _on_startup_configure_neo4j():
-    """Configure neomodel connection to Neo4j"""
+    """Configure neomodel connection to Neo4j.
+
+    neomodel requires the connection string in the form
+    ``bolt://<user>:<password>@<host>:<port>``. We construct that from the
+    individual ``NEO4J_*`` env vars (with credentials URL-encoded so special
+    characters in the password don't break the parser), and also set
+    ``DATABASE_NAME`` separately because neomodel does not read the database
+    name from the URL path.
+    """
     try:
+        from urllib.parse import quote, urlsplit
         from neomodel import config as neomodel_config
-        # Try NEO4J_DATABASE_URL1 first, fallback to constructing from components
+
         neo4j_url = os.getenv("NEO4J_DATABASE_URL1")
         if not neo4j_url:
-            # Construct from individual components
-            uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1")
+            uri = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687").strip()
             username = os.getenv("NEO4J_USERNAME", "neo4j")
             password = os.getenv("NEO4J_PASSWORD", "12345678")
             database = os.getenv("NEO4J_DATABASE", "neo4j")
-            # Convert neo4j:// to bolt:// for neomodel
-            if uri.startswith("neo4j://"):
-                uri = uri.replace("neo4j://", "bolt://")
-            neo4j_url = f"{uri.rstrip('/')}/{database}?auth={username}:{password}"
-            logger.info(f"Constructed Neo4j URL from components: {uri}/{database}")
-        
+
+            parsed = urlsplit(uri if "://" in uri else f"bolt://{uri}")
+            host_port = parsed.netloc or parsed.path  # fallback if no scheme was given
+            if not host_port:
+                host_port = "127.0.0.1:7687"
+
+            neo4j_url = (
+                f"bolt://{quote(username, safe='')}:{quote(password, safe='')}"
+                f"@{host_port}"
+            )
+            neomodel_config.DATABASE_NAME = database
+            logger.info(
+                "Constructed Neo4j URL from components: bolt://%s@%s (database=%s)",
+                username, host_port, database,
+            )
+
         if neo4j_url:
             neomodel_config.DATABASE_URL = neo4j_url
             logger.info("✓ Neo4j neomodel configured successfully")
