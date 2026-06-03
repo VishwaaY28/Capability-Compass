@@ -15,6 +15,7 @@ import logging
 import asyncio
 import tempfile
 import hashlib
+import time
 from typing import List, Dict, AsyncGenerator, Optional
 from pathlib import Path
 from datetime import datetime
@@ -117,6 +118,166 @@ def _get_cached_extraction(file_hash: str, config_hash: str) -> Optional[Dict]:
     except Exception as e:
         logger.warning(f"Failed to retrieve cached extraction: {e}")
         return None
+
+
+def _safe_write_ingestion_log(**kwargs) -> None:
+    """
+    Persist an ingestion run record to the JSONL log file.
+
+    Failures are swallowed (and logged) so that ingestion logging never
+    breaks the extraction pipeline.
+    """
+    try:
+        from utils.ingestion_logger import build_run_entry, write_ingestion_log
+        write_ingestion_log(build_run_entry(**kwargs))
+    except Exception as exc:  # pragma: no cover - logging must never crash extraction
+        logger.warning(f"[INGESTION_LOG] Failed to write ingestion log: {exc}", exc_info=True)
+
+
+def _validate_document_against_ontology(chunks: List[Dict]) -> Dict:
+    """
+    Pre-LLM gate: score the document chunks against the FIBO ontology.
+
+    Returns:
+        {
+          "available":      <bool>  — ontology service usable
+          "relevance":      <DocumentRelevance.to_dict() or {}>,
+          "ontology_meta":  <metadata snapshot used in this run>,
+          "focus_prompt":   <str — prompt fragment to inject into the agent
+                              system prompt, empty if no concepts hit>,
+          "is_relevant":    <bool — final accept/reject>,
+          "rejection_reason": <str | None>,
+          "error":          <str | None>,
+        }
+
+    On any internal failure the document is treated as *relevant* (i.e. we
+    fall back to the previous "extract everything" behaviour) so an outage
+    in the ontology service never blocks ingestion. The downstream
+    post-extraction guardrail is still in place as a safety net.
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+    except Exception as exc:
+        logger.warning(f"[Ontology] Document gate unavailable, allowing through: {exc}", exc_info=True)
+        return {
+            "available": False,
+            "relevance": {},
+            "ontology_meta": {},
+            "focus_prompt": "",
+            "is_relevant": True,
+            "rejection_reason": None,
+            "error": str(exc),
+        }
+
+    relevance = ontology.score_document(chunks)
+    focus_prompt = ontology.build_extraction_focus(relevance.top_concepts)
+
+    logger.info(
+        "[Ontology] Document gate: relevant=%s top_score=%.3f doc_threshold=%.3f "
+        "top_concepts=[%s]",
+        relevance.is_relevant,
+        relevance.aggregate_score,
+        relevance.doc_threshold,
+        ", ".join(
+            f"{h.concept_label}({h.best_chunk_score:.2f})"
+            for h in relevance.top_concepts
+        ) or "<none>",
+    )
+
+    return {
+        "available": True,
+        "relevance": relevance.to_dict(),
+        "ontology_meta": ontology.metadata(),
+        "focus_prompt": focus_prompt,
+        "is_relevant": relevance.is_relevant,
+        "rejection_reason": relevance.rejection_reason,
+        "error": None,
+    }
+
+
+def _apply_ontology_guardrail(
+    extracted_data: Dict,
+    capability_name: Optional[str] = None,
+    document_top_concept_iris: Optional[List[str]] = None,
+) -> Dict:
+    """
+    Run the FIBO ontology guardrail over the extracted processes and return:
+
+        {
+          "annotated_data":   <model with processes filtered + ontology_alignment metadata>,
+          "ontology_meta":    <ontology descriptor>,
+          "guardrail_summary":<full guardrail outcome incl. candidates/accepted/rejected>,
+          "accepted":         <list[GuardrailMatch.to_dict()]>,
+          "rejected":         <list[GuardrailMatch.to_dict()]>,
+          "available":        <bool — whether the ontology service was usable>,
+          "error":            <str | None>,
+        }
+
+    On any internal failure the original ``extracted_data`` is returned
+    unmodified so the rest of the pipeline still works.
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+    except Exception as exc:
+        logger.warning(f"[Ontology] Guardrail unavailable, skipping: {exc}", exc_info=True)
+        return {
+            "annotated_data": extracted_data,
+            "ontology_meta": {},
+            "guardrail_summary": {"applied": False, "reason": "ontology_unavailable"},
+            "accepted": [],
+            "rejected": [],
+            "available": False,
+            "error": str(exc),
+        }
+
+    processes = extracted_data.get("processes", []) or []
+    # Pass the capability name as scoring context so processes inherit the
+    # document's dominant theme (e.g. "Securities Clearing and Settlement"
+    # → its child processes are scored against settlement-related concepts
+    # instead of accidentally matching unrelated "...management" labels).
+    cap_ctx = capability_name or extracted_data.get("name") or ""
+    result = ontology.apply_guardrail(
+        processes,
+        capability_context=cap_ctx,
+        document_top_concept_iris=document_top_concept_iris,
+    )
+    annotated = ontology.annotate_model(extracted_data, result)
+
+    accepted = [m.to_dict() for m in result.accepted]
+    rejected = [m.to_dict() for m in result.rejected]
+    candidates = [m.to_dict() for m in result.candidates]
+
+    logger.info(
+        "[Ontology] capability='%s' candidates=%d accepted=%d rejected=%d threshold=%.2f max=%d",
+        capability_name or extracted_data.get("name") or "?",
+        len(candidates),
+        len(accepted),
+        len(rejected),
+        result.threshold,
+        result.max_processes,
+    )
+
+    return {
+        "annotated_data": annotated,
+        "ontology_meta": result.ontology_meta,
+        "guardrail_summary": {
+            "applied": True,
+            "threshold": result.threshold,
+            "max_processes": result.max_processes,
+            "candidate_count": len(candidates),
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected),
+            "candidates": candidates,
+            "accepted": accepted,
+            "rejected": rejected,
+        },
+        "accepted": accepted,
+        "rejected": rejected,
+        "available": True,
+        "error": None,
+    }
 
 
 def _save_extraction_to_cache(file_hash: str, config_hash: str, extraction_data: Dict):
@@ -598,12 +759,31 @@ async def extract_capability_model(
         - {"status": "error", "error": "error message"}
     """
     
+    start_time = time.time()
+    file_hash: Optional[str] = None
+    run_config = {
+        "vertical": vertical,
+        "subvertical": subvertical,
+        "extraction_depth": extraction_depth,
+        "skip_embeddings": skip_embeddings,
+    }
+
     try:
         # Log received parameters for verification - use repr() to see True None vs "None" string
         logger.info(f"[Extractor] Received parameters - file: {file_path}, vertical: {repr(vertical)}, subvertical: {repr(subvertical)}, extraction_depth: {repr(extraction_depth)}")
         
         # Validate file exists
         if not os.path.exists(file_path):
+            _safe_write_ingestion_log(
+                source_file=os.path.basename(file_path),
+                file_hash=None,
+                config=run_config,
+                status="error",
+                ontology={},
+                guardrail={"applied": False, "reason": "file_not_found"},
+                error=f"File not found: {file_path}",
+                duration_ms=(time.time() - start_time) * 1000.0,
+            )
             yield {
                 "status": "error",
                 "error": f"File not found: {file_path}"
@@ -625,26 +805,56 @@ async def extract_capability_model(
                 logger.info("[CACHE] Returning cached extraction result - skipping LLM processing")
                 # Enforce depth on cached result too
                 cached_result = _enforce_depth(cached_result, extraction_depth)
+
+                # Apply ontology guardrail to cached output as well so downstream
+                # consumers get the same shape on every run.
+                guardrail = _apply_ontology_guardrail(cached_result, capability_name=cached_result.get("name"))
+                cached_result = guardrail["annotated_data"]
+
                 yield {
                     "status": "cache_hit",
-                    "progress": 100,
+                    "progress": 90,
                     "message": "Retrieved from cache (instant)",
                     "data": cached_result,
-                    "cached": True
+                    "cached": True,
+                    "ontology": guardrail["ontology_meta"],
+                    "guardrail": guardrail["guardrail_summary"],
                 }
+
                 # Still need to return output_path and chunks_path for compatibility
-                # Generate paths even though we're using cache
                 source_filename = Path(file_path).stem
                 output_dir = "Json_Documents"
                 output_path = os.path.join(output_dir, "extracted_capability_model.json")
-                
+
+                final_status = (
+                    "success"
+                    if (not guardrail["available"]) or guardrail["accepted"]
+                    else "ontology_rejected"
+                )
+
+                _safe_write_ingestion_log(
+                    source_file=os.path.basename(file_path),
+                    file_hash=file_hash,
+                    config=run_config,
+                    status=final_status,
+                    ontology=guardrail["ontology_meta"],
+                    guardrail=guardrail["guardrail_summary"],
+                    accepted_processes=guardrail["accepted"],
+                    rejected_processes=guardrail["rejected"],
+                    capability_name=cached_result.get("name"),
+                    duration_ms=(time.time() - start_time) * 1000.0,
+                    cached=True,
+                )
+
                 yield {
                     "status": "success",
                     "progress": 100,
                     "message": "Extraction complete (from cache)",
                     "data": cached_result,
                     "output_path": output_path,
-                    "cached": True
+                    "cached": True,
+                    "ontology": guardrail["ontology_meta"],
+                    "guardrail": guardrail["guardrail_summary"],
                 }
                 return
         
@@ -682,22 +892,105 @@ async def extract_capability_model(
         source_filename = Path(file_path).stem
         chunks_output_path = save_document_chunks(chunks, source_filename)
         logger.info(f"Chunks saved to: {chunks_output_path}")
-        
+
         yield {
             "status": "loading",
             "progress": 35,
             "message": f"Saved {chunk_count} chunks to document_chunks folder"
         }
-        
+
+        # ------------------------------------------------------------------
+        # Step 1.5 — DOCUMENT-LEVEL ONTOLOGY GATE (pre-LLM)
+        # ------------------------------------------------------------------
+        # Before paying for an LLM call we ask: does this document actually
+        # talk about anything FIBO knows about? If the best concept-vs-chunk
+        # score is below COMPASS_DOC_RELEVANCE_THRESHOLD we reject the
+        # document right here. If it passes, the top FIBO concepts are
+        # injected into the agent's system prompt to keep extraction on rails.
+        yield {
+            "status": "validating_document",
+            "progress": 38,
+            "message": "Validating document against FIBO ontology...",
+        }
+
+        doc_gate = _validate_document_against_ontology(chunks)
+
+        if doc_gate["available"] and not doc_gate["is_relevant"]:
+            top_concepts = doc_gate["relevance"].get("top_concepts", [])
+            top_label = top_concepts[0]["concept_label"] if top_concepts else "<no concept>"
+            top_score = top_concepts[0]["best_chunk_score"] if top_concepts else 0.0
+            doc_threshold = doc_gate["relevance"].get("doc_threshold", 0.0)
+            logger.info(
+                "[Extractor] Document rejected by FIBO gate: %s",
+                doc_gate.get("rejection_reason"),
+            )
+
+            _safe_write_ingestion_log(
+                source_file=os.path.basename(file_path),
+                file_hash=file_hash,
+                config=run_config,
+                status="document_rejected",
+                ontology=doc_gate["ontology_meta"],
+                guardrail={
+                    "applied": False,
+                    "reason": "rejected_by_document_gate",
+                    "rejection_reason": doc_gate.get("rejection_reason"),
+                },
+                accepted_processes=[],
+                rejected_processes=[],
+                capability_name=None,
+                duration_ms=(time.time() - start_time) * 1000.0,
+                cached=False,
+                extras={
+                    "document_relevance": doc_gate["relevance"],
+                    "chunks_path": chunks_output_path,
+                    "chunk_count": chunk_count,
+                },
+            )
+
+            yield {
+                "status": "document_rejected",
+                "progress": 100,
+                "message": (
+                    f"Document does not align with the FIBO ontology "
+                    f"(top match: '{top_label}' score={top_score:.3f}, "
+                    f"threshold={doc_threshold:.3f}). "
+                    f"Skipping LLM extraction."
+                ),
+                "ontology": doc_gate["ontology_meta"],
+                "document_relevance": doc_gate["relevance"],
+                "ontology_status": "document_rejected",
+                "data": None,
+            }
+            return
+
+        if doc_gate["available"]:
+            top_concepts = doc_gate["relevance"].get("top_concepts", [])
+            top_label = top_concepts[0]["concept_label"] if top_concepts else "<no concept>"
+            top_score = top_concepts[0]["best_chunk_score"] if top_concepts else 0.0
+            yield {
+                "status": "document_validated",
+                "progress": 40,
+                "message": (
+                    f"Document passes FIBO gate. Top concept: "
+                    f"'{top_label}' (score={top_score:.3f}). "
+                    f"Extraction will be constrained to {len(top_concepts)} "
+                    f"FIBO concept(s)."
+                ),
+                "ontology": doc_gate["ontology_meta"],
+                "document_relevance": doc_gate["relevance"],
+            }
+
         # Step 2: Build extraction instructions based on depth
         yield {
             "status": "extracting",
-            "progress": 40,
+            "progress": 42,
             "message": "Initializing extraction agent..."
         }
-        
+
         depth_instructions = _build_depth_instruction(extraction_depth)
-        agent_instructions = EXTRACTION_INSTRUCTIONS + depth_instructions
+        focus_instructions = doc_gate.get("focus_prompt") or ""
+        agent_instructions = EXTRACTION_INSTRUCTIONS + focus_instructions + depth_instructions
         
         # Create agent with pre-loaded chunks (prevents agent from re-loading document)
         agent = build_extraction_agent(chunks)
@@ -741,6 +1034,16 @@ async def extract_capability_model(
             result = agent.invoke({"messages": [{"role": "user", "content": task}]})
         except Exception as e:
             logger.error(f"[Extractor] Agent execution failed: {e}", exc_info=True)
+            _safe_write_ingestion_log(
+                source_file=os.path.basename(file_path),
+                file_hash=file_hash,
+                config=run_config,
+                status="error",
+                ontology={},
+                guardrail={"applied": False, "reason": "agent_execution_failed"},
+                error=f"Agent execution failed: {str(e)}",
+                duration_ms=(time.time() - start_time) * 1000.0,
+            )
             yield {
                 "status": "error",
                 "error": f"Agent execution failed: {str(e)}"
@@ -778,6 +1081,17 @@ async def extract_capability_model(
         
         if not extracted_data:
             logger.error(f"[Extractor] Failed to parse JSON from response: {final_msg[:500]}")
+            _safe_write_ingestion_log(
+                source_file=os.path.basename(file_path),
+                file_hash=file_hash,
+                config=run_config,
+                status="error",
+                ontology={},
+                guardrail={"applied": False, "reason": "json_parse_failed"},
+                error="Failed to extract valid JSON from LLM response",
+                duration_ms=(time.time() - start_time) * 1000.0,
+                extras={"raw_response_preview": final_msg[:500]},
+            )
             yield {
                 "status": "error",
                 "error": "Failed to extract valid JSON from LLM response",
@@ -794,35 +1108,124 @@ async def extract_capability_model(
         # Step 6b: Enforce extraction depth by trimming data beyond the requested level
         extracted_data = _enforce_depth(extracted_data, extraction_depth)
         logger.info(f"[Extractor] Enforced depth '{extraction_depth}' on extracted data")
-        
-        # Step 7: Save the extracted data
+
+        # Step 6c: Save raw (pre-guardrail) extraction to cache so re-runs can
+        # apply the guardrail again without paying for the LLM call.
+        if file_hash and config_hash:
+            try:
+                _save_extraction_to_cache(file_hash, config_hash, extracted_data)
+                logger.info("[CACHE] Saved extraction result to cache for future reuse")
+            except Exception as cache_exc:
+                logger.warning(f"[CACHE] Failed to save extraction: {cache_exc}")
+
+        # Step 6d: Apply FIBO ontology guardrail. Only quality-aligned processes
+        # survive (default: at most 1 process per document, configurable via
+        # the COMPASS_GUARDRAIL_THRESHOLD / COMPASS_GUARDRAIL_MAX_PROCESSES
+        # environment variables).
+        yield {
+            "status": "validating",
+            "progress": 80,
+            "message": "Validating extracted processes against FIBO ontology...",
+        }
+
+        # Pass Stage 1's top concept IRIs so the guardrail can run a
+        # hierarchy-consistency check (matched concept must live in the
+        # same sub-tree as something the document gate flagged).
+        doc_top_iris = [
+            c.get("concept_iri")
+            for c in (doc_gate.get("relevance", {}).get("top_concepts") or [])
+            if c.get("concept_iri")
+        ]
+        guardrail = _apply_ontology_guardrail(
+            extracted_data,
+            capability_name=extracted_data.get("name"),
+            document_top_concept_iris=doc_top_iris,
+        )
+        extracted_data = guardrail["annotated_data"]
+
+        yield {
+            "status": "ontology_applied",
+            "progress": 90,
+            "message": (
+                "Ontology guardrail unavailable; passing all processes through."
+                if not guardrail["available"]
+                else f"FIBO guardrail kept {len(guardrail['accepted'])}/"
+                     f"{guardrail['guardrail_summary'].get('candidate_count', 0)} processes "
+                     f"(threshold={guardrail['guardrail_summary'].get('threshold')}, "
+                     f"max={guardrail['guardrail_summary'].get('max_processes')})"
+            ),
+            "ontology": guardrail["ontology_meta"],
+            "guardrail": guardrail["guardrail_summary"],
+        }
+
+        # Step 7: Save the (guardrail-filtered) extracted data
         final_path = write_json(output_path, extracted_data)
         logger.info(f"[Extractor] Saved extracted model to: {final_path}")
-        
+
         # Step 8: Re-save chunks with the actual capability name now that we have it
         capability_name = extracted_data.get("name", "capability")
         safe_capability_name = "".join(c if c.isalnum() or c in ('-', '_', ' ') else '_' for c in capability_name).strip()
         chunks_output_path = save_document_chunks(chunks, safe_capability_name)
         logger.info(f"[Extractor] Re-saved chunks with capability name to: {chunks_output_path}")
-        
-        # Step 9: Save to cache for future use
-        if file_hash and config_hash:
-            _save_extraction_to_cache(file_hash, config_hash, extracted_data)
-            logger.info("[CACHE] Saved extraction result to cache for future reuse")
-        
+
+        final_status = (
+            "success"
+            if (not guardrail["available"]) or guardrail["accepted"]
+            else "ontology_rejected"
+        )
+
+        _safe_write_ingestion_log(
+            source_file=os.path.basename(file_path),
+            file_hash=file_hash,
+            config=run_config,
+            status=final_status,
+            ontology=guardrail["ontology_meta"],
+            guardrail=guardrail["guardrail_summary"],
+            accepted_processes=guardrail["accepted"],
+            rejected_processes=guardrail["rejected"],
+            capability_name=extracted_data.get("name"),
+            duration_ms=(time.time() - start_time) * 1000.0,
+            cached=False,
+            extras={
+                "output_path": final_path,
+                "chunks_path": chunks_output_path,
+                "chunk_count": chunk_count,
+                "document_relevance": doc_gate.get("relevance", {}),
+                "document_gate_available": doc_gate.get("available"),
+            },
+        )
+
         yield {
             "status": "success",
             "progress": 100,
-            "message": "Extraction complete",
+            "message": (
+                "Extraction complete"
+                if final_status == "success"
+                else "Extraction complete but no process passed the FIBO ontology guardrail"
+            ),
             "data": extracted_data,
             "output_path": final_path,
             "chunks_path": chunks_output_path,
             "chunk_count": chunk_count,
-            "cached": False
+            "cached": False,
+            "ontology": guardrail["ontology_meta"],
+            "guardrail": guardrail["guardrail_summary"],
+            "document_relevance": doc_gate.get("relevance", {}),
+            "ontology_status": final_status,
         }
-        
+
     except Exception as e:
         logger.error(f"Extraction failed: {type(e).__name__}: {e}", exc_info=True)
+        _safe_write_ingestion_log(
+            source_file=os.path.basename(file_path) if file_path else "unknown",
+            file_hash=file_hash,
+            config=run_config,
+            status="error",
+            ontology={},
+            guardrail={"applied": False, "reason": "unhandled_exception"},
+            error=f"{type(e).__name__}: {e}",
+            duration_ms=(time.time() - start_time) * 1000.0,
+        )
         yield {
             "status": "error",
             "error": str(e),

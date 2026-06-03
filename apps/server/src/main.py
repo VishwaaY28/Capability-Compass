@@ -64,23 +64,41 @@ def _on_startup_initialize_azure_clients():
 
 @app.on_event("startup")
 def _on_startup_configure_neo4j():
-    """Configure neomodel connection to Neo4j"""
+    """Configure neomodel connection to Neo4j.
+
+    neomodel requires the connection string in the form
+    ``bolt://<user>:<password>@<host>:<port>``. We construct that from the
+    individual ``NEO4J_*`` env vars (with credentials URL-encoded so special
+    characters in the password don't break the parser), and also set
+    ``DATABASE_NAME`` separately because neomodel does not read the database
+    name from the URL path.
+    """
     try:
+        from urllib.parse import quote, urlsplit
         from neomodel import config as neomodel_config
-        # Try NEO4J_DATABASE_URL1 first, fallback to constructing from components
+
         neo4j_url = os.getenv("NEO4J_DATABASE_URL1")
         if not neo4j_url:
-            # Construct from individual components
-            uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1")
+            uri = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687").strip()
             username = os.getenv("NEO4J_USERNAME", "neo4j")
             password = os.getenv("NEO4J_PASSWORD", "12345678")
             database = os.getenv("NEO4J_DATABASE", "neo4j")
-            # Convert neo4j:// to bolt:// for neomodel
-            if uri.startswith("neo4j://"):
-                uri = uri.replace("neo4j://", "bolt://")
-            neo4j_url = f"{uri.rstrip('/')}/{database}?auth={username}:{password}"
-            logger.info(f"Constructed Neo4j URL from components: {uri}/{database}")
-        
+
+            parsed = urlsplit(uri if "://" in uri else f"bolt://{uri}")
+            host_port = parsed.netloc or parsed.path  # fallback if no scheme was given
+            if not host_port:
+                host_port = "127.0.0.1:7687"
+
+            neo4j_url = (
+                f"bolt://{quote(username, safe='')}:{quote(password, safe='')}"
+                f"@{host_port}"
+            )
+            neomodel_config.DATABASE_NAME = database
+            logger.info(
+                "Constructed Neo4j URL from components: bolt://%s@%s (database=%s)",
+                username, host_port, database,
+            )
+
         if neo4j_url:
             neomodel_config.DATABASE_URL = neo4j_url
             logger.info("✓ Neo4j neomodel configured successfully")
@@ -98,6 +116,56 @@ def _on_startup_seed_neo4j():
     """
     logger.info("Server started - use CSV upload to populate data")
     # No static seeding - all data comes from CSV
+
+
+@app.on_event("startup")
+def _on_startup_load_fibo_ontology():
+    """
+    Pre-load the FIBO ontology used by the Compass ingestion guardrail and,
+    on a best-effort basis, project it into Neo4j as `:OntologyConcept`
+    nodes so it is browseable alongside ingested capabilities.
+
+    Failures are logged but never abort startup — ingestion will continue
+    without the guardrail and ingestion logs will mark the run accordingly.
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+        meta = ontology.metadata()
+        logger.info(
+            "FIBO ontology ready: %s (%d concepts, threshold=%.2f, max_processes=%d)",
+            meta.get("ontology_label") or meta.get("ontology_iri"),
+            meta.get("concept_count", 0),
+            meta.get("threshold", 0.0),
+            meta.get("max_processes", 1),
+        )
+
+        # Best-effort Neo4j sync — only if the graph is reachable.
+        try:
+            from neo4j_graph.services.query_execution_service import Neo4jQueryService
+            svc = Neo4jQueryService()
+            try:
+                rows = svc.execute_cypher(
+                    "MATCH (n:OntologyConcept) RETURN count(n) AS n"
+                )
+                concept_count = rows[0]["n"] if rows else 0
+            finally:
+                svc.close()
+
+            if concept_count == 0:
+                summary = ontology.sync_to_neo4j(replace_existing=False)
+                logger.info(
+                    "FIBO ontology synced to Neo4j on startup: %s", summary
+                )
+            else:
+                logger.info(
+                    "FIBO ontology already present in Neo4j (%d concepts) — skipping startup sync",
+                    concept_count,
+                )
+        except Exception as e:
+            logger.warning(f"FIBO ontology Neo4j sync skipped on startup: {e}")
+    except Exception as e:
+        logger.error(f"FIBO ontology preload failed: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

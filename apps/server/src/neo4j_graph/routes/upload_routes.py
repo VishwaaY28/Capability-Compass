@@ -19,6 +19,141 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["Upload"])
 
 
+# ---------------------------------------------------------------------------
+# FIBO ontology + Compass ingestion log endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/ontology")
+async def get_ontology_descriptor(include_concepts: bool = Query(True)):
+    """
+    Return the loaded FIBO ontology descriptor used by the Compass guardrail.
+
+    Includes ontology metadata (IRI, label, concept count, threshold) and,
+    by default, the full list of concepts (label / definition / parents).
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+        payload = {"ontology": ontology.metadata()}
+        if include_concepts:
+            payload["concepts"] = ontology.get_concepts()
+        return payload
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to read ontology: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ontology/sync")
+async def sync_ontology_to_neo4j(
+    replace_existing: bool = Query(True, description="Wipe existing :OntologyConcept nodes before sync"),
+):
+    """
+    Project the FIBO ontology into Neo4j as ``(:OntologyConcept)-[:SUBCLASS_OF]->(:OntologyConcept)``.
+
+    Useful for browsing the ontology alongside ingested capabilities.
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+        summary = ontology.sync_to_neo4j(replace_existing=replace_existing)
+        return {"status": "success", "summary": summary}
+    except Exception as e:
+        logger.error(f"Ontology sync failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ontology/reload")
+async def reload_ontology():
+    """Force a re-read of the FIBO RDF file from disk (e.g. after replacing it)."""
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service(reload=True)
+        return {"status": "success", "ontology": ontology.metadata()}
+    except Exception as e:
+        logger.error(f"Ontology reload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ontology/score-document")
+async def score_document_against_ontology(
+    file: UploadFile = File(...),
+    top_k: Optional[int] = Query(None, ge=1, le=50),
+    doc_threshold: Optional[float] = Query(None, ge=0.0, le=1.0),
+    chunk_threshold: Optional[float] = Query(None, ge=0.0, le=1.0),
+):
+    """
+    Score an uploaded document against the FIBO ontology *without* extracting.
+
+    Returns the document-level relevance verdict plus the top concepts and
+    their evidence chunks. Useful as a dry-run before paying for an LLM
+    extraction call.
+    """
+    try:
+        from utils.deepagent_extractor import load_document
+        from utils.ontology import get_ontology_service
+
+        allowed_extensions = [".pdf", ".docx", ".txt"]
+        file_ext = Path(file.filename or "").suffix.lower()
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {file_ext}. Allowed: {', '.join(allowed_extensions)}",
+            )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_path = tmp_file.name
+
+        try:
+            chunks = load_document(tmp_path)
+            ontology = get_ontology_service()
+            relevance = ontology.score_document(
+                chunks,
+                top_k=top_k,
+                doc_threshold=doc_threshold,
+                chunk_threshold=chunk_threshold,
+            )
+            return {
+                "status": "success",
+                "filename": file.filename,
+                "ontology": ontology.metadata(),
+                "document_relevance": relevance.to_dict(),
+                "would_extract": relevance.is_relevant,
+            }
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document scoring failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ingestion-logs")
+async def list_ingestion_logs(limit: int = Query(50, ge=1, le=1000)):
+    """
+    Return the most recent Compass ingestion runs.
+
+    Each entry includes the source document, file hash, configuration, the
+    ontology metadata that was applied, the per-process guardrail outcome
+    (candidates / accepted / rejected with scores), capability name, status,
+    duration and any error.
+    """
+    try:
+        from utils.ingestion_logger import read_ingestion_logs
+        return read_ingestion_logs(limit=limit)
+    except Exception as e:
+        logger.error(f"Failed to read ingestion logs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/pdf")
 async def upload_and_extract_pdf(
     file: UploadFile = File(...),
@@ -172,8 +307,33 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
         "subprocesses_created": 0,
         "data_entities_created": 0,
         "data_elements_created": 0,
-        "chunks_imported": 0
+        "chunks_imported": 0,
+        "ontology_links_created": 0,
     }
+
+    # If the model carries guardrail metadata we make a best-effort to ensure
+    # the FIBO ontology is also present in the graph so :ALIGNED_WITH edges
+    # have a target node. This is a no-op if Neo4j or the ontology service
+    # are unavailable and never fails the import.
+    try:
+        if model_data.get("ontology_guardrail", {}).get("applied"):
+            from neo4j_graph.services.query_execution_service import Neo4jQueryService
+            check_svc = Neo4jQueryService()
+            try:
+                rows = check_svc.execute_cypher(
+                    "MATCH (n:OntologyConcept) RETURN count(n) AS n"
+                )
+                concept_count = rows[0]["n"] if rows else 0
+            finally:
+                check_svc.close()
+
+            if concept_count == 0:
+                from utils.ontology import get_ontology_service
+                ontology = get_ontology_service()
+                ontology.sync_to_neo4j(replace_existing=False)
+                logger.info("[Import] Auto-synced FIBO ontology to Neo4j (was empty)")
+    except Exception as e:
+        logger.warning(f"[Import] FIBO ontology auto-sync skipped: {e}")
     
     try:
         # Step 1: Ensure vertical exists
@@ -333,6 +493,51 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
             )
             stats["processes_created"] += 1
             stats["subprocesses_created"] += len(subprocesses_data)
+
+            # If this process was aligned with a FIBO concept by the
+            # ontology guardrail, materialise the alignment in the graph.
+            alignment = proc_data.get("ontology_alignment") or {}
+            concept_iri = alignment.get("concept_iri")
+            if concept_iri:
+                try:
+                    from neo4j_graph.services.query_execution_service import Neo4jQueryService
+                    align_svc = Neo4jQueryService()
+                    try:
+                        align_svc.execute_cypher(
+                            """
+                            MATCH (p:Process {uid: $proc_uid})
+                            MERGE (oc:OntologyConcept {iri: $iri})
+                              ON CREATE SET oc.label = $label,
+                                            oc.source = $source,
+                                            oc.created_from = 'guardrail_import'
+                            MERGE (p)-[r:ALIGNED_WITH]->(oc)
+                            SET r.score = $score,
+                                r.score_breakdown = $score_breakdown,
+                                r.threshold = $threshold,
+                                r.source = $source,
+                                r.aligned_at = datetime()
+                            SET p.ontology_concept_iri = $iri,
+                                p.ontology_concept_label = $label,
+                                p.ontology_score = $score
+                            """,
+                            {
+                                "proc_uid": new_uid,
+                                "iri": concept_iri,
+                                "label": alignment.get("concept_label") or "",
+                                "score": float(alignment.get("score") or 0.0),
+                                "score_breakdown": str(alignment.get("score_breakdown") or {}),
+                                "threshold": float(alignment.get("threshold") or 0.0),
+                                "source": alignment.get("source") or "FIBO",
+                            },
+                        )
+                        stats["ontology_links_created"] += 1
+                    finally:
+                        align_svc.close()
+                except Exception as link_exc:
+                    logger.warning(
+                        f"[Import] Failed to link Process {new_uid} to ontology concept "
+                        f"{concept_iri}: {link_exc}"
+                    )
             
             # Count data entities and elements created
             for sp in subprocesses_data:

@@ -178,13 +178,21 @@ def initialize_azure_clients():
         )
         logger.info("✓ Independent Azure OpenAI client initialized")
         
-        # Initialize LangChain Azure Chat OpenAI client for DeepAgent
+        # Initialize LangChain Azure Chat OpenAI client for DeepAgent.
+        # ``max_retries=5`` lets the underlying OpenAI SDK ride out the
+        # typical Azure TPM-bucket refill window (30-60s) on 429s using
+        # exponential backoff, instead of bubbling the rate-limit error
+        # up after only 2 quick retries (the SDK default).
+        # ``timeout=120`` covers the long agent invocations that send
+        # full document context to the model in a single request.
         _azure_chat_openai_client = AzureChatOpenAI(
             azure_deployment=_azure_config["deployment"],
             api_version=_azure_config["api_version"],
             azure_endpoint=endpoint,
             api_key=_azure_config["api_key"],
             streaming=True,
+            max_retries=5,
+            timeout=120,
         )
         logger.info("✓ AzureChatOpenAI client initialized")
         
