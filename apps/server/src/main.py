@@ -118,6 +118,56 @@ def _on_startup_seed_neo4j():
     # No static seeding - all data comes from CSV
 
 
+@app.on_event("startup")
+def _on_startup_load_fibo_ontology():
+    """
+    Pre-load the FIBO ontology used by the Compass ingestion guardrail and,
+    on a best-effort basis, project it into Neo4j as `:OntologyConcept`
+    nodes so it is browseable alongside ingested capabilities.
+
+    Failures are logged but never abort startup — ingestion will continue
+    without the guardrail and ingestion logs will mark the run accordingly.
+    """
+    try:
+        from utils.ontology import get_ontology_service
+        ontology = get_ontology_service()
+        meta = ontology.metadata()
+        logger.info(
+            "FIBO ontology ready: %s (%d concepts, threshold=%.2f, max_processes=%d)",
+            meta.get("ontology_label") or meta.get("ontology_iri"),
+            meta.get("concept_count", 0),
+            meta.get("threshold", 0.0),
+            meta.get("max_processes", 1),
+        )
+
+        # Best-effort Neo4j sync — only if the graph is reachable.
+        try:
+            from neo4j_graph.services.query_execution_service import Neo4jQueryService
+            svc = Neo4jQueryService()
+            try:
+                rows = svc.execute_cypher(
+                    "MATCH (n:OntologyConcept) RETURN count(n) AS n"
+                )
+                concept_count = rows[0]["n"] if rows else 0
+            finally:
+                svc.close()
+
+            if concept_count == 0:
+                summary = ontology.sync_to_neo4j(replace_existing=False)
+                logger.info(
+                    "FIBO ontology synced to Neo4j on startup: %s", summary
+                )
+            else:
+                logger.info(
+                    "FIBO ontology already present in Neo4j (%d concepts) — skipping startup sync",
+                    concept_count,
+                )
+        except Exception as e:
+            logger.warning(f"FIBO ontology Neo4j sync skipped on startup: {e}")
+    except Exception as e:
+        logger.error(f"FIBO ontology preload failed: {e}", exc_info=True)
+
+
 if __name__ == "__main__":
     import uvicorn
 
