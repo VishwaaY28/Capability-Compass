@@ -9,6 +9,7 @@ import {
 } from 'react-icons/fi';
 import toast, { Toaster } from 'react-hot-toast';
 import * as ExtractionManager from '../utils/extractionManager';
+import { API_BASE } from '../utils/apiBase';
 
 interface ExtractedCapabilityModel {
   id?: number;
@@ -248,7 +249,7 @@ const CompassIngestion: React.FC = () => {
     try {
       toast.loading('Importing to graph database...', { id: 'import-toast' });
       
-      const response = await fetch('/api/upload/import-to-graph', {
+      const response = await fetch(`${API_BASE}/upload/import-to-graph`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

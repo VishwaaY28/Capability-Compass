@@ -1,5 +1,5 @@
 {
-  "provider": "azure",
+  "provider": "gemini",
   "vaultName": "https://fstodevazureopenai.vault.azure.net/",
   "temperature": 0.5,
   "topP": 0.9

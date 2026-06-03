@@ -10,8 +10,9 @@ import { transformApiResponseToNvl } from '../components/visualizer/utils/transf
 import type { TraversalNode, TraversalRelationship } from '../components/visualizer/utils/transformer'
 import type { EntityType, EntityListItem, Direction, ApiResponse } from '../components/visualizer/types'
 import '../components/visualizer/visualizer.css'
+import { API_BASE as API } from '../utils/apiBase';
 
-const API_BASE = '/api'
+const API_BASE = API
 const ANIMATION_DELAY = 80
 const ANIMATION_BATCH_SIZE = 5   // nodes revealed per tick
 const ANIMATION_NODE_LIMIT = 80  // skip animation above this count

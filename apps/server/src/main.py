@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Compass Master API",
     description="API for Compass Master application - Neo4j Backend",
+    root_path="/Capability-Compass"
 )
 
 app.add_middleware(
@@ -106,7 +107,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host='0.0.0.0',
-        port=8005,
+        port=8010,
         log_level=env["LOG_LEVEL"].lower(),
         reload=True,
     )

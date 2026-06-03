@@ -1,3 +1,5 @@
+import { API_BASE } from './apiBase';
+
 // Module-level extraction state manager — survives component unmount/remount
 interface ExtractedCapabilityModel {
   id?: number;
@@ -135,7 +137,7 @@ export async function startExtraction(
   if (subVertical.trim()) params.append('subvertical', subVertical.trim());
   params.append('extraction_depth', depth);
 
-  const url = `/api/upload/pdf${params.toString() ? `?${params.toString()}` : ''}`;
+  const url = `${API_BASE}/upload/pdf${params.toString() ? `?${params.toString()}` : ''}`;
 
   try {
     const response = await fetch(url, {
