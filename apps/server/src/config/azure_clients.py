@@ -178,16 +178,24 @@ def initialize_azure_clients():
         )
         logger.info("✓ Independent Azure OpenAI client initialized")
         
-        # Initialize LangChain Azure Chat OpenAI client for DeepAgent
+        # Initialize LangChain Azure Chat OpenAI client for DeepAgent.
+        # ``max_retries=5`` lets the underlying OpenAI SDK ride out the
+        # typical Azure TPM-bucket refill window (30-60s) on 429s using
+        # exponential backoff, instead of bubbling the rate-limit error
+        # up after only 2 quick retries (the SDK default).
+        # ``timeout=120`` covers the long agent invocations that send
+        # full document context to the model in a single request.
         _azure_chat_openai_client = AzureChatOpenAI(
             azure_deployment=_azure_config["deployment"],
             api_version=_azure_config["api_version"],
             azure_endpoint=endpoint,
             api_key=_azure_config["api_key"],
             streaming=True,
+            max_retries=5,
+            timeout=120,
         )
         logger.info("✓ AzureChatOpenAI client initialized")
-        
+
         # Initialize embedding client
         _azure_embedding_client = AzureOpenAI(
             api_key=_azure_embedding_config["api_key"],
@@ -195,9 +203,9 @@ def initialize_azure_clients():
             base_url=f"{_azure_embedding_config['endpoint']}/openai/deployments/{_azure_embedding_config['deployment']}"
         )
         logger.info("✓ Azure embedding client initialized")
-        
+
         logger.info("All Azure OpenAI clients initialized successfully!")
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize Azure clients: {e}")
         raise
