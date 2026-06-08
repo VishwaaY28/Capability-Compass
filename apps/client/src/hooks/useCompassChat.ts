@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { API_BASE } from "@/utils/apiBase.ts";
 
 export interface ChatMessage {
   id: string;
@@ -198,7 +199,7 @@ export const useCompassChat = (): UseCompassChatReturn => {
       };
       setMessages((prev) => [...prev, userMessage]);
 
-      const response = await fetch('/api/chat/compass', {
+      const response = await fetch(`${API_BASE}/chat/compass`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, vertical, temperature: 0.7, max_tokens: 2000 }),
@@ -318,7 +319,7 @@ export const useCompassChat = (): UseCompassChatReturn => {
     };
 
     // WITH DB
-    fetch('/api/chat/compass', {
+    fetch(`${API_BASE}/chat/compass`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, vertical, temperature: 0.7, max_tokens: 2000 }),
@@ -348,7 +349,7 @@ export const useCompassChat = (): UseCompassChatReturn => {
       .finally(onBothDone);
 
     // INDEPENDENT
-    fetch('/api/chat/compass/independent', {
+    fetch(`${API_BASE}/chat/compass/independent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, vertical, temperature: 0.7, max_tokens: 2000 }),
@@ -384,7 +385,7 @@ export const useCompassChat = (): UseCompassChatReturn => {
     independentData: any
   ) => {
     try {
-      await fetch('/api/chat/compass/log-dual', {
+      await fetch(`${API_BASE}/chat/compass/log-dual`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

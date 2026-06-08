@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { API_BASE } from "@/utils/apiBase.ts";
 
 
 export type Vertical = {
@@ -63,7 +64,7 @@ export type Capability = {
 };
 
 
-const BASE_URL = '/api';
+const BASE_URL = API_BASE;
 
 async function fetcher<T>(url: string, options?: RequestInit): Promise<T> {
 	const res = await fetch(url, options);

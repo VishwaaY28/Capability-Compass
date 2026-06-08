@@ -551,7 +551,7 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
         if chunks_path and os.path.exists(chunks_path):
             try:
                 import json
-                with open(chunks_path, 'r', encoding='utf-8') as f:
+                with open(chunks_path, 'r', encoding='cp1252') as f:
                     chunks_data = json.load(f)
                     chunks = chunks_data.get("chunks", [])
                     

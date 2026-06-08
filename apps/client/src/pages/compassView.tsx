@@ -3,7 +3,6 @@ import { FiDownload, FiX, FiSearch } from 'react-icons/fi';
 import { Toaster, toast } from 'react-hot-toast';
 import { useCapabilityApi } from '../hooks/useCapability';
 import type { Capability } from '../hooks/useCapability';
-import favicon from '../assets/favicon.png';
 
 export default function CompassView() {
   const [capabilities, setCapabilities] = useState<Capability[]>([]);

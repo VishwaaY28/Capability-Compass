@@ -61,8 +61,9 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
-
+],{
+  basename: '/Capability-Compass'
+    });
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>

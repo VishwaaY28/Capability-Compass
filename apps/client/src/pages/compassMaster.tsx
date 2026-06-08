@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { FiEye, FiEdit2, FiEdit3, FiPlus, FiChevronRight, FiChevronDown, FiLayers, FiTrash2 } from 'react-icons/fi'
 import { Toaster, toast } from 'react-hot-toast'
-
+import { API_BASE } from '../utils/apiBase';
 
 import { useCapabilityApi } from '../hooks/useCapability';
 import type { Capability, Process, Vertical, SubVertical } from '../hooks/useCapability';
@@ -256,8 +256,7 @@ export default function Home() {
 
       if (ids.length === 1) {
         // Single export - download directly
-        const res = await fetch(`/api/export/capability/${ids[0]}/csv`);
-        if (!res.ok) throw new Error((await res.text()) || 'Export failed');
+        const res = await fetch(`${API_BASE}/export/capability/${ids[0]}/csv`);        if (!res.ok) throw new Error((await res.text()) || 'Export failed');
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -271,8 +270,7 @@ export default function Home() {
       } else {
         // Multi export - download each file sequentially
         for (const id of ids) {
-          const res = await fetch(`/api/export/capability/${id}/csv`);
-          if (!res.ok) {
+          const res = await fetch(`${API_BASE}export/capability/${id}/csv`);          if (!res.ok) {
             toast.error(`Failed to export capability ${id}`);
             continue;
           }
