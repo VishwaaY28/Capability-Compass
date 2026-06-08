@@ -7,8 +7,8 @@ export default function Hero() {
       <header className="bg-white/80 backdrop-blur-sm border-b">
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <img src="/favicon.png" width={48} height={48} alt="Capability Compass" />
-            <div>
+          <img src={`${import.meta.env.BASE_URL}favicon.png`} width={48} height={48} alt="Capability Compass" />
+          <div>
               <h1 className="text-lg font-semibold">Capability Compass</h1>
               <p className="text-xs text-muted-foreground">Decide. Model. See the impact.</p>
             </div>
@@ -63,7 +63,7 @@ export default function Hero() {
 
           <div className="flex justify-center lg:justify-center">
             <div className="rounded-xl bg-gradient-to-tr from-primary/10 to-secondary/10 p-8 shadow-lg">
-              <img src="/hero_logo.png" alt="Capability Compass" className="w-72 h-auto object-contain" />
+            <img src={`${import.meta.env.BASE_URL}hero_logo.png`} alt="Capability Compass" className="w-72 h-auto object-contain" />
             </div>
           </div>
         </section>

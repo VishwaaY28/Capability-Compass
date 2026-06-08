@@ -1186,8 +1186,7 @@ const CompassChat: React.FC = () => {
                           {/* Card Header with Toggle */}
                           <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-200">
                             <div className="flex items-center gap-2">
-                              <img src="/favicon.png" alt="Compass" className="w-10 h-10" />
-                              <h3 className="text-sm font-semibold text-gray-900">
+                            <img src={`${import.meta.env.BASE_URL}favicon.png`} alt="Compass" className="w-10 h-10" />                              <h3 className="text-sm font-semibold text-gray-900">
                                 Using Capability Compass
                               </h3>
                             </div>
@@ -1227,8 +1226,7 @@ const CompassChat: React.FC = () => {
                           {/* Card Header with Toggle */}
                           <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-200">
                            <div className="flex items-center gap-2">
-                              <img src="/llm.png" alt="llm" className="w-10 h-10" />
-                              <h3 className="text-sm font-semibold text-gray-900">
+                           <img src={`${import.meta.env.BASE_URL}llm.png`} alt="llm" className="w-10 h-10" />                              <h3 className="text-sm font-semibold text-gray-900">
                                 Without Capability Compass
                               </h3>
                             </div>

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { FiChevronLeft, FiChevronRight,FiEye, FiLogOut,FiUpload, FiHome, FiBarChart, FiLayers, FiSettings, FiX, FiMessageSquare } from 'react-icons/fi';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-
+import { API_BASE } from '@/utils/apiBase';
 interface LLMSettings {
   provider: string;
   vaultName: string;
@@ -38,7 +38,7 @@ const Sidebar: React.FC = () => {
   useEffect(() => {
     const fetchLLMSettings = async () => {
       try {
-        const response = await fetch('/api/settings/llm-provider');
+        const response = await fetch(`${API_BASE}/settings/llm-provider`);
         const data = await response.json();
         setLlmSettings(prev => ({
           ...prev,
@@ -57,7 +57,7 @@ const Sidebar: React.FC = () => {
   const handleLLMProviderChange = async (provider: string) => {
     setIsLoadingLLM(true);
     try {
-      const response = await fetch('/api/settings/llm-provider', {
+      const response = await fetch(`${API_BASE}/settings/llm-provider`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider }),
@@ -77,7 +77,7 @@ const Sidebar: React.FC = () => {
   const handleLLMSettingsSave = async () => {
     setIsLoadingLLM(true);
     try {
-      const response = await fetch('/api/settings/llm-config', {
+      const response = await fetch(`${API_BASE}/settings/llm-config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(llmSettings),
@@ -104,8 +104,7 @@ const Sidebar: React.FC = () => {
       <div className={`p-4 border-b border-gray-200 flex items-center justify-between relative`}>
         {collapsed ? (
           <>
-            <img src="/favicon.png" alt="Compass" className="w-6 h-6" />
-            <button
+            <img src={`${import.meta.env.BASE_URL}favicon.png`} alt="Compass" className="w-6 h-6" />            <button
               onClick={() => setCollapsed(!collapsed)}
               className="p-1 hover:bg-gray-100 rounded-md"
               title="Expand"
@@ -116,8 +115,7 @@ const Sidebar: React.FC = () => {
         ) : (
           <>
             <div className="flex items-center gap-2">
-              <img src="/favicon.png" alt="Compass" className="w-6 h-6" />
-              <h2 className="font-bold text-lg text-gray-900">Capability Compass</h2>
+            <img src={`${import.meta.env.BASE_URL}favicon.png`} alt="Compass" className="w-6 h-6" />              <h2 className="font-bold text-lg text-gray-900">Capability Compass</h2>
             </div>
             <button
               onClick={() => setCollapsed(!collapsed)}
