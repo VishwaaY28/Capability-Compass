@@ -242,3 +242,40 @@
 .viz-app .zoom-btn:disabled { opacity: 0.4; cursor: not-allowed; background: #F5F5F5; }
 .viz-app .zoom-btn-text { width: auto; padding: 0 12px; font-size: 0.85rem; }
 .viz-app .zoom-level { margin-left: 8px; font-size: 0.85rem; font-weight: 600; color: #666666; min-width: 45px; text-align: center; }
+
+.viz-app .fullscreen-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid #D5D6D8;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #333333;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.viz-app .fullscreen-btn:hover { background: #E3F2FD; border-color: #1976D2; color: #1976D2; }
+.viz-app .fullscreen-btn svg { width: 20px; height: 20px; }
+
+.viz-app.fullscreen-mode {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #ffffff;
+  height: 100vh;
+  width: 100vw;
+}
+
+.viz-app.fullscreen-mode > header,
+.viz-app.fullscreen-mode .app-controls { display: none !important; }
+
+.viz-app.fullscreen-mode .app-main { height: 100%; }
+.viz-app.fullscreen-mode .graph-container { border-radius: 0; }
