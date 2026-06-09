@@ -15,7 +15,7 @@ import { API_BASE as API } from '../utils/apiBase';
 const API_BASE = API
 const ANIMATION_DELAY = 80
 const ANIMATION_BATCH_SIZE = 5   // nodes revealed per tick
-const ANIMATION_NODE_LIMIT = 80  // skip animation above this count
+const ANIMATION_NODE_LIMIT = 80  
 const PATH_HIGHLIGHT_COLOR = '#1976D2'
 const PATH_STROKE_WIDTH = 3
 const NORMAL_STROKE_WIDTH = 1.5
@@ -42,11 +42,25 @@ const CompassVisualizer: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<{ id: string; label: string; properties: Record<string, unknown>; path?: Array<{ name: string; type: string }> } | null>(null)
   const [parentMap, setParentMap] = useState<Map<string, string>>(new Map())
   const [currentZoom, setCurrentZoom] = useState(DEFAULT_ZOOM)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const animationRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => { fetchEntities() }, [entityType])
   useEffect(() => { if (selectedEntityId !== null) fetchSubtree() }, [selectedEntityId, depth, direction])
   useEffect(() => () => { if (animationRef.current) clearTimeout(animationRef.current) }, [])
+
+  useEffect(() => {
+    if (!isFullscreen) return
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsFullscreen(false) }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [isFullscreen])
+
+  useEffect(() => {
+    if (visibleNodes.length === 0) return
+    const t = setTimeout(() => { if (nvlRef.current) nvlRef.current.fit(visibleNodes.map(n => n.id)) }, 250)
+    return () => clearTimeout(t)
+  }, [isFullscreen])
 
   const animateTraversal = useCallback((nodes: TraversalNode[], rels: TraversalRelationship[]) => {
     if (animationRef.current) clearTimeout(animationRef.current)
@@ -208,6 +222,8 @@ const CompassVisualizer: React.FC = () => {
     }
   }, [visibleNodes])
 
+  const toggleFullscreen = useCallback(() => setIsFullscreen(prev => !prev), [])
+
   const handleNodeClick = (node: Node, _hitTargets: HitTargets, originalEvent: MouseEvent) => {
     originalEvent.stopPropagation()
     const fullNode = allNodes.find(n => n.id === node.id)
@@ -232,7 +248,7 @@ const CompassVisualizer: React.FC = () => {
   }
 
   return (
-    <div className="viz-app">
+    <div className={`viz-app${isFullscreen ? ' fullscreen-mode' : ''}`}>
         <header className="border-b sticky top-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-50">
           <div className="container px-6 py-4">
               <div className="flex items-center gap-3">
@@ -276,6 +292,29 @@ const CompassVisualizer: React.FC = () => {
           <span className="zoom-level">{Math.round(currentZoom * 100)}%</span>
         </div>
 
+        <button
+          className="fullscreen-btn"
+          onClick={toggleFullscreen}
+          aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+          title={isFullscreen ? 'Exit Fullscreen (Esc)' : 'Fullscreen'}
+        >
+          {isFullscreen ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+              <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+              <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+              <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          )}
+        </button>
+
         <div className="graph-container" onClick={(e) => { if (e.target === e.currentTarget) clearPathHighlight() }}>
           {loading && <div className="loading-overlay"><div className="spinner"></div></div>}
           {animating && <div className="animation-indicator">Traversing path... ({visibleNodes.length}/{allNodes.length} nodes)</div>}
@@ -283,7 +322,15 @@ const CompassVisualizer: React.FC = () => {
             <div className="graph-wrapper">
               <InteractiveNvlWrapper
                 ref={nvlRef}
-                style={{ borderRadius: 10, border: '2px solid #D5D6D8', height: '100%', width: '100%', minHeight: '600px', minWidth: '800px', background: '#ffffff' }}
+                style={{
+                  borderRadius: isFullscreen ? 0 : 10,
+                  border: isFullscreen ? 'none' : '2px solid #D5D6D8',
+                  height: '100%',
+                  width: '100%',
+                  minHeight: '600px',
+                  minWidth: '800px',
+                  background: '#ffffff',
+                }}
                 nodes={visibleNodes}
                 rels={visibleRels}
                 mouseEventCallbacks={mouseEventCallbacks}
