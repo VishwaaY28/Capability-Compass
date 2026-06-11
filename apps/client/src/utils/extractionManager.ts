@@ -82,6 +82,17 @@ export type FileStatus =
   | 'rejected'
   | 'error';
 
+/**
+ * Distinguishes a free-form `document` (PDF/DOCX/TXT — needs LLM + FIBO
+ * guardrail) from a `tabular` source (CSV/XLSX — already structured, so we
+ * parse + display only, skipping ontology and LLM extraction).
+ *
+ * Both flows produce the same `ExtractedCapabilityModel` shape; this flag
+ * only governs which import endpoint to call when the user clicks
+ * "Import to Graph".
+ */
+export type SourceType = 'document' | 'tabular';
+
 interface UploadedFile {
   id: string;
   name: string;
@@ -91,6 +102,7 @@ interface UploadedFile {
   progress: number;
   error?: string;
   extractedData?: ExtractedCapabilityModel;
+  sourceType?: SourceType;
   chunks_path?: string;
   // FIBO ontology metadata captured during this run
   ontology?: OntologyMeta;
@@ -98,6 +110,13 @@ interface UploadedFile {
   guardrail?: OntologyGuardrailSummary;
   ontology_status?: 'success' | 'document_rejected' | 'ontology_rejected';
   rejection_reason?: string;
+}
+
+const TABULAR_EXTENSIONS = ['.csv', '.xlsx', '.xls'];
+
+export function detectSourceType(fileName: string): SourceType {
+  const lower = fileName.toLowerCase();
+  return TABULAR_EXTENSIONS.some((ext) => lower.endsWith(ext)) ? 'tabular' : 'document';
 }
 
 interface ExtractionEvent {
@@ -137,6 +156,26 @@ let thinkingState = { isThinking: false, message: '' };
 let pendingModalData: { data: ExtractedCapabilityModel; fileId: string } | null = null;
 // Notifications surface info about rejected documents to the page so it can toast
 let pendingRejection: { fileId: string; fileName: string; reason: string } | null = null;
+
+/**
+ * In-memory cache of the actual `File` objects keyed by upload id. Required
+ * because (a) drag-and-drop never populates the hidden `<input>`, and
+ * (b) tabular uploads need to re-send the same file when the user clicks
+ * "Import to Graph" after previewing.
+ */
+const fileObjectCache = new Map<string, File>();
+
+export function registerFileObject(id: string, file: File) {
+  fileObjectCache.set(id, file);
+}
+
+export function getFileObject(id: string): File | undefined {
+  return fileObjectCache.get(id);
+}
+
+export function dropFileObject(id: string) {
+  fileObjectCache.delete(id);
+}
 
 // Subscribers for state updates
 type Subscriber = (files: UploadedFile[], thinking: { isThinking: boolean; message: string }) => void;
@@ -190,12 +229,14 @@ export function addFiles(newFiles: UploadedFile[]) {
 export function removeFile(id: string) {
   cachedFiles = cachedFiles.filter((f) => f.id !== id);
   saveFiles(cachedFiles);
+  dropFileObject(id);
   notifySubscribers();
 }
 
 export function clearAllFiles() {
   cachedFiles = [];
   saveFiles(cachedFiles);
+  fileObjectCache.clear();
   notifySubscribers();
 }
 
@@ -210,18 +251,129 @@ function setThinking(isThinking: boolean, message: string = '') {
   notifySubscribers();
 }
 
+/**
+ * Public entry point: dispatches to either the LLM-backed document flow
+ * (PDF/DOCX/TXT, with FIBO guardrail) or the tabular flow (CSV/XLSX,
+ * parsed directly via the CSV import service — no LLM, no ontology).
+ *
+ * Both flows ultimately populate `extractedData` with the same shape and
+ * trigger `onModalOpen` with that single model — the popup looks identical.
+ */
 export async function startExtraction(
   file: UploadedFile,
   actualFile: File,
   vertical: string,
   subVertical: string,
   depth: string,
-  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void
+  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
+) {
+  registerFileObject(file.id, actualFile);
+
+  const sourceType = detectSourceType(file.name);
+  if (sourceType === 'tabular') {
+    return startTabularExtraction(file, actualFile, onModalOpen);
+  }
+  return startDocumentExtraction(file, actualFile, vertical, subVertical, depth, onModalOpen);
+}
+
+/**
+ * CSV/XLSX flow: a single POST to `/upload/tabular-preview` returns an
+ * `ExtractedCapabilityModel` (capabilities in the file are aggregated
+ * server-side). No streaming, no guardrail.
+ */
+async function startTabularExtraction(
+  file: UploadedFile,
+  actualFile: File,
+  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
 ) {
   const controller = new AbortController();
   activeExtractions.set(file.id, controller);
 
-  updateFile(file.id, { status: 'uploading', progress: 10 });
+  updateFile(file.id, {
+    status: 'uploading',
+    progress: 20,
+    sourceType: 'tabular',
+  });
+  setThinking(true, 'Parsing tabular file...');
+
+  const formData = new FormData();
+  formData.append('file', actualFile);
+
+  try {
+    const response = await fetch(`${API_BASE}/upload/tabular-preview`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let detail = `Preview failed: ${response.statusText}`;
+      try {
+        const errorPayload = await response.json();
+        if (errorPayload?.detail) detail = errorPayload.detail;
+      } catch {
+        // body was not JSON
+      }
+      throw new Error(detail);
+    }
+
+    const payload = await response.json();
+    const model: ExtractedCapabilityModel | undefined = payload.model;
+
+    if (!model) {
+      throw new Error('File parsed successfully but no capability data was returned.');
+    }
+
+    updateFile(file.id, {
+      status: 'success',
+      progress: 100,
+      sourceType: 'tabular',
+      extractedData: model,
+      ontology_status: 'success',
+    });
+    setThinking(false);
+
+    try {
+      onModalOpen(model, file.id);
+    } catch {
+      pendingModalData = { data: model, fileId: file.id };
+    }
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      console.log('Tabular extraction aborted for', file.id);
+      return;
+    }
+    console.error('Tabular preview error:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+    updateFile(file.id, { status: 'error', error: errorMsg, sourceType: 'tabular' });
+    // Stash the failure so the page can surface it as a toast even if the
+    // user navigated away during the upload.
+    pendingRejection = {
+      fileId: file.id,
+      fileName: file.name,
+      reason: errorMsg,
+    };
+    setThinking(false);
+  } finally {
+    activeExtractions.delete(file.id);
+    if (activeExtractions.size === 0) {
+      setThinking(false);
+    }
+  }
+}
+
+async function startDocumentExtraction(
+  file: UploadedFile,
+  actualFile: File,
+  vertical: string,
+  subVertical: string,
+  depth: string,
+  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
+) {
+  const controller = new AbortController();
+  activeExtractions.set(file.id, controller);
+
+  updateFile(file.id, { status: 'uploading', progress: 10, sourceType: 'document' });
 
   const formData = new FormData();
   formData.append('file', actualFile);
@@ -346,7 +498,7 @@ function handleExtractionEvent(
   fileId: string,
   fileName: string,
   event: ExtractionEvent,
-  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void
+  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
 ) {
   switch (event.status) {
     case 'started':
