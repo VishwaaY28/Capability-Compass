@@ -17,6 +17,7 @@ import type {
   DocumentRelevance,
   OntologyGuardrailSummary,
   FileStatus,
+  SourceType,
 } from '../utils/extractionManager';
 
 interface ExtractedCapabilityModel {
@@ -54,6 +55,12 @@ interface UploadedFile {
   progress: number;
   error?: string;
   extractedData?: ExtractedCapabilityModel;
+  /**
+   * Distinguishes free-form documents (PDF/DOCX/TXT — LLM extraction) from
+   * tabular uploads (CSV/XLSX — direct mapping). Only affects which import
+   * endpoint the "Import to Graph" button hits; the preview popup is the same.
+   */
+  sourceType?: SourceType;
   chunks_path?: string;
   ontology?: OntologyMeta;
   document_relevance?: DocumentRelevance;
@@ -74,6 +81,7 @@ const CompassIngestion: React.FC = () => {
   const [showModal, setShowModal] = useState<boolean>(false);
   const [modalData, setModalData] = useState<ExtractedCapabilityModel | null>(null);
   const [modalFileId, setModalFileId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
   const [thinkingMessage, setThinkingMessage] = useState<string>("");
   
@@ -164,8 +172,20 @@ const CompassIngestion: React.FC = () => {
   };
 
   const handleFiles = (fileList: FileList) => {
+    const existing = ExtractionManager.getFiles();
+    const existingKeys = new Set(existing.map((f) => `${f.name}|${f.size}`));
+
     const newFiles: UploadedFile[] = [];
+    const skipped: string[] = [];
+
     Array.from(fileList).forEach((file) => {
+      const key = `${file.name}|${file.size}`;
+      if (existingKeys.has(key)) {
+        skipped.push(file.name);
+        return;
+      }
+      existingKeys.add(key);
+
       const id = `${Date.now()}-${Math.random()}`;
       newFiles.push({
         id,
@@ -174,10 +194,21 @@ const CompassIngestion: React.FC = () => {
         type: file.type,
         status: 'pending',
         progress: 0,
+        sourceType: ExtractionManager.detectSourceType(file.name),
       });
+      ExtractionManager.registerFileObject(id, file);
     });
-    ExtractionManager.addFiles(newFiles);
-    toast.success(`${newFiles.length} file(s) added`);
+
+    if (newFiles.length > 0) {
+      ExtractionManager.addFiles(newFiles);
+      toast.success(`${newFiles.length} file(s) added`);
+    }
+    if (skipped.length > 0) {
+      toast.error(
+        `Skipped ${skipped.length} duplicate file(s) already in the list: ${skipped.join(', ')}`,
+        { duration: 4500 },
+      );
+    }
   };
 
   const removeFile = (id: string) => {
@@ -189,18 +220,25 @@ const CompassIngestion: React.FC = () => {
   };
 
   const uploadAndExtractFile = async (file: UploadedFile) => {
-    const fileInputElement = fileInputRef.current;
-    if (!fileInputElement || !fileInputElement.files) return;
-
-    let actualFile: File | null = null;
-    for (const f of fileInputElement.files) {
-      if (f.name === file.name && f.size === file.size) {
-        actualFile = f;
-        break;
+    // Prefer the cached File (works for drag-drop too); fall back to the
+    // hidden input as a safety net.
+    let actualFile: File | null = ExtractionManager.getFileObject(file.id) ?? null;
+    if (!actualFile) {
+      const fileInputElement = fileInputRef.current;
+      if (fileInputElement && fileInputElement.files) {
+        for (const f of fileInputElement.files) {
+          if (f.name === file.name && f.size === file.size) {
+            actualFile = f;
+            break;
+          }
+        }
       }
     }
-    
-    if (!actualFile) return;
+
+    if (!actualFile) {
+      toast.error(`Could not locate file contents for "${file.name}". Please re-add it.`);
+      return;
+    }
 
     await ExtractionManager.startExtraction(
       file,
@@ -209,11 +247,11 @@ const CompassIngestion: React.FC = () => {
       manualSubVertical,
       extractionDepth,
       (data, fileId) => {
-        setModalData(data as ExtractedCapabilityModel);
+        setModalData(data);
         setModalFileId(fileId);
         setShowModal(true);
         toast.success(`Extraction successful: ${file.name}`);
-      }
+      },
     );
   };
 
@@ -236,56 +274,108 @@ const CompassIngestion: React.FC = () => {
   };
 
   /**
-   * Import extracted model to graph database
+   * Import the previewed model into the graph database.
+   *
+   * - Document flow (PDF/DOCX/TXT): POSTs the structured `ExtractedCapabilityModel`
+   *   to `/upload/import-to-graph`.
+   * - Tabular flow (CSV/XLSX): re-sends the original file to `/upload/csv`,
+   *   which uses the optimized batch importer (the file carries
+   *   verticals/sub-verticals/org-units/applications that the in-memory
+   *   model shape doesn't preserve).
    */
   const handleImportToGraph = async (fileId: string) => {
-    const file = files.find((f) => f.id === fileId);
-    if (!file || !file.extractedData) {
-      toast.error('No extracted data to import');
+    // Guard against double-clicks / accidental re-fires which would
+    // re-run the importer and create duplicate capabilities/relationships.
+    if (isImporting) {
       return;
     }
 
+    const file = files.find((f) => f.id === fileId);
+    if (!file) {
+      toast.error('File not found');
+      return;
+    }
+
+    const isTabular = file.sourceType === 'tabular';
+
+    setIsImporting(true);
     try {
       toast.loading('Importing to graph database...', { id: 'import-toast' });
-      
-      const response = await fetch(`${API_BASE}/upload/import-to-graph`, {        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model_data: file.extractedData,
-          chunks_path: file.chunks_path || null,
-        }),
-      });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Import failed');
+      let result: any;
+      if (isTabular) {
+        const actualFile = ExtractionManager.getFileObject(fileId);
+        if (!actualFile) {
+          throw new Error(
+            'Original spreadsheet contents are no longer available. Please re-upload the file.',
+          );
+        }
+
+        const formData = new FormData();
+        formData.append('file', actualFile);
+
+        const response = await fetch(`${API_BASE}/upload/csv`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || 'Import failed');
+        }
+
+        result = await response.json();
+      } else {
+        if (!file.extractedData) {
+          throw new Error('No extracted data to import');
+        }
+
+        const response = await fetch(`${API_BASE}/upload/import-to-graph`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model_data: file.extractedData,
+            chunks_path: file.chunks_path || null,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || 'Import failed');
+        }
+
+        result = await response.json();
       }
 
-      const result = await response.json();
-      
-      // Close the modal after successful import
       setShowModal(false);
       setModalData(null);
       setModalFileId(null);
-      
+
       toast.success('Successfully imported to graph database!', { id: 'import-toast' });
-      
-      // Show import summary
-      const summary = result.summary;
+
+      const summary = result.summary || {};
       console.log('Import Summary:', summary);
-      toast.success(
-        `Created ${summary.processes_created} processes with ${summary.subprocesses_created} subprocesses${
-          summary.chunks_imported ? ` and ${summary.chunks_imported} knowledge chunks` : ''
-        }`,
-        { duration: 4000 }
-      );
+      if (isTabular) {
+        toast.success(
+          `Created ${summary.capabilities_created || 0} capability/ies, ` +
+            `${summary.processes_created || 0} process(es), ` +
+            `${summary.subprocesses_created || 0} subprocess(es)`,
+          { duration: 5000 },
+        );
+      } else {
+        toast.success(
+          `Created ${summary.processes_created || 0} processes with ${summary.subprocesses_created || 0} subprocesses${
+            summary.chunks_imported ? ` and ${summary.chunks_imported} knowledge chunks` : ''
+          }`,
+          { duration: 4000 },
+        );
+      }
     } catch (error) {
-      const errorMsg =
-        error instanceof Error ? error.message : 'Import failed';
+      const errorMsg = error instanceof Error ? error.message : 'Import failed';
       toast.error(errorMsg, { id: 'import-toast' });
       console.error('Import error:', error);
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -520,7 +610,7 @@ const CompassIngestion: React.FC = () => {
                   </button>
                 </p>
                 <p className="text-xs text-gray-500">
-                  PDF, DOCX, TXT (Max 100MB)
+                  PDF, DOCX, TXT, CSV, XLSX (Max 100MB)
                 </p>
               </div>
 
@@ -530,7 +620,7 @@ const CompassIngestion: React.FC = () => {
                 multiple
                 onChange={handleFileInputChange}
                 className="hidden"
-                accept=".pdf,.docx,.doc,.txt"
+                accept=".pdf,.docx,.doc,.txt,.csv,.xlsx,.xls"
               />
             </div>
 
@@ -830,15 +920,20 @@ const CompassIngestion: React.FC = () => {
                   onClick={() => {
                     if (modalFileId) handleImportToGraph(modalFileId);
                   }}
-                  disabled={!modalData.processes || modalData.processes.length === 0}
-                  className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={
+                    !modalData.processes || modalData.processes.length === 0 || isImporting
+                  }
+                  className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   title={
                     !modalData.processes || modalData.processes.length === 0
                       ? 'No processes available to import'
+                      : isImporting
+                      ? 'Import in progress…'
                       : 'Import this capability into the graph'
                   }
                 >
-                  Import to Graph
+                  {isImporting && <FiLoader className="animate-spin" size={14} />}
+                  {isImporting ? 'Importing…' : 'Import to Graph'}
                 </button>
               )}
               <button

@@ -9,7 +9,7 @@ import logging
 import tempfile
 import csv
 import io
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pathlib import Path
@@ -151,6 +151,93 @@ async def list_ingestion_logs(limit: int = Query(50, ge=1, le=1000)):
         return read_ingestion_logs(limit=limit)
     except Exception as e:
         logger.error(f"Failed to read ingestion logs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/repair-uids")
+async def repair_duplicate_uids():
+    """
+    One-shot maintenance: scan every node label that the CSV/LLM importer
+    writes to and re-issue a globally unique ``uid`` to nodes that share
+    one with another node of the same label.
+
+    Background: an earlier version of the batch CSV importer assigned
+    ``uid = idx + 1`` starting from 1 for every import, which collided
+    with UIDs already in the graph. The downstream delete API matches
+    by ``uid`` and runs ``DETACH DELETE`` — so deleting one capability
+    would also wipe any other node of the same label that had the
+    duplicated UID. This endpoint repairs the existing graph in place
+    (newer imports already use ``max(uid)+1``).
+
+    Returns a per-label report of how many UID collisions were fixed.
+    """
+    try:
+        from neo4j_graph.services.query_execution_service import Neo4jQueryService
+
+        labels = [
+            "Vertical",
+            "SubVertical",
+            "Capability",
+            "Process",
+            "Subprocess",
+            "DataEntity",
+            "DataElements",
+            "OrganizationUnit",
+            "ApplicationCatalog",
+        ]
+
+        report = {}
+        svc = Neo4jQueryService()
+        try:
+            for label in labels:
+                # Find groups where two or more nodes share the same uid
+                duplicate_query = f"""
+                MATCH (n:`{label}`)
+                WHERE n.uid IS NOT NULL
+                WITH n.uid AS uid, collect(n) AS nodes
+                WHERE size(nodes) > 1
+                RETURN uid, [x IN nodes | id(x)] AS internal_ids
+                """
+                duplicate_groups = svc.execute_cypher(duplicate_query) or []
+
+                if not duplicate_groups:
+                    report[label] = {"collisions": 0, "reassigned": 0}
+                    continue
+
+                # Current max uid on this label, so re-issues never re-collide
+                max_query = f"MATCH (n:`{label}`) RETURN coalesce(max(n.uid), 0) AS max_uid"
+                max_rows = svc.execute_cypher(max_query) or []
+                next_uid = (max_rows[0]["max_uid"] or 0) + 1
+
+                reassigned = 0
+                for group in duplicate_groups:
+                    # Keep the first node's uid, re-issue UIDs for the rest
+                    for internal_id in group["internal_ids"][1:]:
+                        svc.execute_cypher(
+                            f"""
+                            MATCH (n:`{label}`) WHERE id(n) = $iid
+                            SET n.uid = $new_uid
+                            """,
+                            {"iid": internal_id, "new_uid": next_uid},
+                        )
+                        next_uid += 1
+                        reassigned += 1
+
+                report[label] = {
+                    "collisions": len(duplicate_groups),
+                    "reassigned": reassigned,
+                }
+                logger.info(
+                    f"[UID repair] {label}: fixed {len(duplicate_groups)} collision group(s), "
+                    f"reassigned {reassigned} node(s)"
+                )
+        finally:
+            svc.close()
+
+        return {"status": "success", "report": report}
+
+    except Exception as e:
+        logger.error(f"UID repair failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -632,16 +719,407 @@ async def _import_model_to_neo4j(model_data: dict, chunks_path: Optional[str] = 
 
 
 
+TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+
+def _xlsx_to_csv_text(xlsx_bytes: bytes) -> str:
+    """
+    Convert XLSX/XLS bytes to CSV text using openpyxl.
+
+    Any leading rows that are completely empty are skipped so the first
+    *non-empty* row becomes the CSV header. Cells containing ``None`` are
+    emitted as empty strings.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=True)
+    ws = wb.active
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    seen_non_empty = False
+    for row in ws.iter_rows(values_only=True):
+        cells = ["" if cell is None else str(cell) for cell in row]
+        if not seen_non_empty:
+            if not any(c.strip() for c in cells):
+                continue
+            seen_non_empty = True
+        writer.writerow(cells)
+
+    return output.getvalue()
+
+
+def _read_tabular_file_as_csv(filename: str, content: bytes) -> str:
+    """
+    Normalise a CSV/XLSX upload to CSV text so the rest of the pipeline can
+    treat it uniformly. Raises ``HTTPException`` for unsupported types.
+    """
+    file_ext = Path(filename or "").suffix.lower()
+    if file_ext not in TABULAR_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported tabular file type: {file_ext}. "
+                f"Allowed: {', '.join(sorted(TABULAR_EXTENSIONS))}"
+            ),
+        )
+
+    if file_ext in {".xlsx", ".xls"}:
+        try:
+            return _xlsx_to_csv_text(content)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to parse spreadsheet: {e}",
+            )
+
+    # Try the common encodings; `utf-8-sig` first so a BOM at the very top
+    # of the file is stripped automatically.
+    for encoding in ("utf-8-sig", "cp1252", "utf-8", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+# Map of accepted header *aliases* → the canonical column name that
+# `CSVImportService` expects. Each alias is matched after normalization
+# (lower-cased, whitespace-collapsed, hyphens treated like spaces) so
+# minor casing / punctuation / pluralisation differences in the source
+# spreadsheet do not require the user to rename headers.
+HEADER_ALIASES: Dict[str, List[str]] = {
+    "Vertical": ["vertical","VERTICAL"],
+    "Sub Vertical": ["sub vertical", "subvertical", "SUBVERTICAL","SUB-VERTICAL","sub-vertical","Sub-Vertical"],
+    "Capability Name": ["capability name", "capability", "CAPABILITY NAME", "CAPABILITY"],
+    "Process": ["process", "process name", "PROCESS", "PROCESS NAME"],
+    "Process Description": ["process description", "PROCESS DESCRIPTION", "PROCESS-DESCRIPTION","process-description"],
+    "Sub Process": [
+        "sub process",
+        "subprocess",
+        "sub process name",
+        "subprocess name",
+        "sub-process"
+    ],
+    "Sub-Process Description": [
+        "sub process description",
+        "subprocess description",
+        "sub-process description",
+    ],
+    "Data Entity": ["data entity", "dataentity"],
+    "Data Entity Description": ["data entity description"],
+    "Data Element": ["data element", "dataelement"],
+    "Data Element Description": ["data element description"],
+    "Organization Units": [
+        "organization units",
+        "organisation units",
+        "org units",
+        "organizational units",
+        "organisational units",
+        "organization unit",
+        "organisation unit",
+        "org unit",
+    ],
+    "Applications": [
+        "applications",
+        "application",
+        "apps",
+        "app",
+        "supporting applications",
+        "supporting application",
+    ],
+}
+
+
+def _normalize_csv_headers(csv_text: str) -> str:
+    """
+    Rewrite the first non-empty row of ``csv_text`` so that any header
+    whose normalised form matches one of the canonical
+    ``CSVImportService.EXPECTED_COLUMNS`` (directly or via
+    ``HEADER_ALIASES``) is replaced by the canonical casing/spacing that
+    the validator and parser expect.
+
+    Normalisation: trim, lower-case, collapse runs of whitespace, treat
+    hyphens like spaces (so ``"Sub-Process"`` and ``"Sub Process"``
+    collide), so headers like ``"Application"`` are accepted as
+    ``"Applications"``.
+
+    Also strips a UTF-8 BOM from the very first character.
+
+    Unknown headers are passed through unchanged so partial files still
+    surface a descriptive "Missing columns" error.
+    """
+    import re
+    from neo4j_graph.services.csv_import_service import CSVImportService
+
+    if not csv_text:
+        return csv_text
+
+    if csv_text.startswith("\ufeff"):
+        csv_text = csv_text[1:]
+
+    reader = csv.reader(io.StringIO(csv_text))
+    try:
+        first_row = next(reader)
+    except StopIteration:
+        return csv_text
+
+    def _norm(s: str) -> str:
+        s = (s or "").replace("-", " ")
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    # Build the alias → canonical lookup: every expected column maps to
+    # itself, then every entry in HEADER_ALIASES (re-normalised so the
+    # author of the alias map doesn't have to be exact).
+    alias_to_canonical: Dict[str, str] = {
+        _norm(col): col for col in CSVImportService.EXPECTED_COLUMNS
+    }
+    for canonical_name, aliases in HEADER_ALIASES.items():
+        for alias in aliases:
+            alias_to_canonical[_norm(alias)] = canonical_name
+
+    rewritten_headers = [alias_to_canonical.get(_norm(h), h) for h in first_row]
+
+    body_io = io.StringIO()
+    writer = csv.writer(body_io, lineterminator="\n")
+    writer.writerow(rewritten_headers)
+    for remaining in reader:
+        writer.writerow(remaining)
+    return body_io.getvalue()
+
+
+def _build_capabilities_from_csv_text(csv_text: str) -> List[Dict[str, Any]]:
+    """
+    Group already-validated CSV rows into ``ExtractedCapabilityModel``-shaped
+    dictionaries — one per distinct ``Capability Name`` — so the UI can
+    render them the same way it renders LLM-extracted models.
+
+    No Neo4j writes happen here; this is a pure transformation.
+    """
+    from neo4j_graph.services.csv_import_service import CSVImportService
+
+    rows = CSVImportService.parse_csv_rows(csv_text)
+
+    capabilities_map: Dict[str, Dict[str, Any]] = {}
+    processes_map: Dict[tuple, Dict[str, Any]] = {}
+    subprocesses_map: Dict[tuple, Dict[str, Any]] = {}
+    data_entities_map: Dict[tuple, Dict[str, Any]] = {}
+    seen_elements: set = set()
+
+    for row in rows:
+        cap_name = row["capability_name"]
+        if not cap_name:
+            continue
+
+        cap = capabilities_map.get(cap_name)
+        if cap is None:
+            cap = {
+                "name": cap_name,
+                "description": "",
+                "vertical": row["vertical"],
+                "subvertical": row["subvertical"],
+                "processes": [],
+            }
+            capabilities_map[cap_name] = cap
+        else:
+            if not cap["vertical"] and row["vertical"]:
+                cap["vertical"] = row["vertical"]
+            if not cap["subvertical"] and row["subvertical"]:
+                cap["subvertical"] = row["subvertical"]
+
+        proc_name = row["process_name"]
+        if not proc_name:
+            continue
+
+        pkey = (cap_name, proc_name)
+        proc = processes_map.get(pkey)
+        if proc is None:
+            proc = {
+                "name": proc_name,
+                "level": "core",
+                "description": row["process_desc"],
+                "category": None,
+                "subprocesses": [],
+            }
+            processes_map[pkey] = proc
+            cap["processes"].append(proc)
+        elif not proc["description"] and row["process_desc"]:
+            proc["description"] = row["process_desc"]
+
+        sub_name = row["subprocess_name"]
+        if not sub_name:
+            continue
+
+        skey = (cap_name, proc_name, sub_name)
+        sub = subprocesses_map.get(skey)
+        if sub is None:
+            sub = {
+                "name": sub_name,
+                "description": row["subprocess_desc"],
+                "category": None,
+                "data_entities": [],
+            }
+            subprocesses_map[skey] = sub
+            proc["subprocesses"].append(sub)
+        elif not sub["description"] and row["subprocess_desc"]:
+            sub["description"] = row["subprocess_desc"]
+
+        de_name = row["data_entity_name"]
+        if not de_name:
+            continue
+
+        dekey = (cap_name, proc_name, sub_name, de_name)
+        de = data_entities_map.get(dekey)
+        if de is None:
+            de = {
+                "data_entity_name": de_name,
+                "data_entity_description": row["data_entity_desc"],
+                "data_elements": [],
+            }
+            data_entities_map[dekey] = de
+            sub["data_entities"].append(de)
+        elif not de["data_entity_description"] and row["data_entity_desc"]:
+            de["data_entity_description"] = row["data_entity_desc"]
+
+        elem_name = row["data_element_name"]
+        if not elem_name:
+            continue
+
+        elemkey = (cap_name, proc_name, sub_name, de_name, elem_name)
+        if elemkey in seen_elements:
+            continue
+        seen_elements.add(elemkey)
+        de["data_elements"].append({
+            "data_element_name": elem_name,
+            "data_element_description": row["data_element_desc"],
+        })
+
+    return list(capabilities_map.values())
+
+
+def _aggregate_capabilities_into_single_model(
+    capabilities: List[Dict[str, Any]],
+    filename: str,
+) -> Dict[str, Any]:
+    """
+    Collapse one-or-many capabilities parsed from a CSV/XLSX into a single
+    ``ExtractedCapabilityModel`` shape so the existing single-capability
+    ingestion modal can render the result without any special casing.
+
+    - If the file contains exactly one capability, it is returned as-is.
+    - If it contains multiple, they are merged: the file stem becomes the
+      model name, vertical/sub-vertical fall back to "Multiple" when the
+      source rows disagree, and every process is appended under a flat
+      ``processes`` list in the order it appeared.
+    """
+    if not capabilities:
+        raise HTTPException(
+            status_code=400,
+            detail="No capability rows found in the file (every row was empty or missing a Capability Name).",
+        )
+
+    if len(capabilities) == 1:
+        only = dict(capabilities[0])
+        if not only.get("description"):
+            only["description"] = f"Imported from {filename}"
+        return only
+
+    verticals = {c.get("vertical") for c in capabilities if c.get("vertical")}
+    subverticals = {c.get("subvertical") for c in capabilities if c.get("subvertical")}
+
+    merged_vertical = verticals.pop() if len(verticals) == 1 else "Multiple"
+    merged_subvertical = subverticals.pop() if len(subverticals) == 1 else "Multiple"
+
+    aggregated_processes: List[Dict[str, Any]] = []
+    for cap in capabilities:
+        for proc in cap.get("processes", []):
+            aggregated_processes.append(proc)
+
+    stem = Path(filename).stem or filename
+    cap_names = ", ".join(c["name"] for c in capabilities)
+
+    return {
+        "name": stem,
+        "description": f"Imported from {filename} ({len(capabilities)} capabilities: {cap_names})",
+        "vertical": merged_vertical,
+        "subvertical": merged_subvertical,
+        "processes": aggregated_processes,
+    }
+
+
+@router.post("/tabular-preview")
+async def preview_tabular_file(file: UploadFile = File(...)):
+    """
+    Parse a CSV/XLSX capability mapping file and return the hierarchical
+    structure WITHOUT running the LLM extractor, the FIBO ontology guardrail,
+    or any Neo4j writes.
+
+    The response shape mirrors the LLM-extracted ``ExtractedCapabilityModel``
+    so the existing ingestion modal can render it unchanged. If the file
+    contains multiple capabilities they are merged into one model whose
+    ``processes`` list is the concatenation of every capability's processes.
+    """
+    try:
+        from neo4j_graph.services.csv_import_service import CSVImportService
+
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Filename is required")
+
+        content = await file.read()
+        csv_text = _read_tabular_file_as_csv(file.filename, content)
+        csv_text = _normalize_csv_headers(csv_text)
+
+        is_valid, error_msg = CSVImportService.validate_csv_structure(csv_text)
+        if not is_valid:
+            # Surface the actual header row we saw so the user can spot the
+            # mismatch (extra spaces, different casing, wrong sheet, etc.).
+            try:
+                first_line = csv_text.splitlines()[0] if csv_text else ""
+                observed_headers = next(csv.reader(io.StringIO(first_line)))
+            except Exception:
+                observed_headers = []
+            logger.warning(
+                f"[Tabular preview] '{file.filename}' rejected: {error_msg}. "
+                f"Observed headers: {observed_headers}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid tabular file structure: {error_msg}. "
+                    f"Found columns: {observed_headers}"
+                ),
+            )
+
+        capabilities = _build_capabilities_from_csv_text(csv_text)
+        model = _aggregate_capabilities_into_single_model(capabilities, file.filename)
+
+        logger.info(
+            f"Tabular preview parsed '{file.filename}': "
+            f"{len(capabilities)} capability/ies, {len(model['processes'])} process(es)"
+        )
+
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "model": model,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Tabular preview failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/csv")
 async def upload_csv(
     file: UploadFile = File(...),
     clear_existing: bool = Query(False, description="Clear existing data before import"),
-    use_batch: bool = Query(True, description="Use optimized batch import (recommended)")
 ):
     """
-    Upload a CSV file and import capability model to Neo4j.
+    Upload a CSV or XLSX file and import the capability model to Neo4j.
     
-    Expected CSV columns:
+    Expected columns (header row):
     - Vertical
     - Sub Vertical
     - Capability Name
@@ -658,31 +1136,25 @@ async def upload_csv(
     
     Query Parameters:
     - clear_existing: If true, clears all existing data before import
-    - use_batch: If true, uses optimized batch import (much faster, recommended)
     
     Returns:
         Import summary with counts of created entities
     """
     try:
-        # Validate file type
-        if not file.filename or not file.filename.endswith('.csv'):
-            raise HTTPException(
-                status_code=400,
-                detail="File must be a CSV file"
-            )
-        
-        # Read CSV content
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Filename is required")
+
         content = await file.read()
-        csv_text = content.decode('cp1252')  # Handle BOM if present
-        
-        logger.info(f"Processing CSV file: {file.filename} (batch mode: {use_batch})")
-        
-        # Parse and import CSV
-        if use_batch:
-            from neo4j_graph.services.csv_batch_import_service import CSVBatchImportService
-            summary = CSVBatchImportService.import_csv_batch(csv_text, clear_existing)
-        else:
-            summary = await _import_csv_to_neo4j(csv_text, clear_existing)
+        csv_text = _read_tabular_file_as_csv(file.filename, content)
+        csv_text = _normalize_csv_headers(csv_text)
+
+        logger.info(f"Processing tabular file: {file.filename}")
+
+        # Always use the row-by-row CSVImportService path: it calls
+        # get_max_uids() so newly created nodes get globally-unique UIDs
+        # (the batch path used idx+1 which collided with existing UIDs
+        # and caused delete-by-uid to wipe unrelated nodes).
+        summary = await _import_csv_to_neo4j(csv_text, clear_existing)
         
         # Refresh the LLM catalog so newly imported capabilities are immediately searchable
         try:
@@ -693,7 +1165,7 @@ async def upload_csv(
         
         return {
             "status": "success",
-            "message": "Successfully imported CSV to graph database",
+            "message": "Successfully imported tabular file to graph database",
             "summary": summary
         }
         
