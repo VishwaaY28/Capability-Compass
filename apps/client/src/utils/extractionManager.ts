@@ -72,15 +72,48 @@ export interface OntologyGuardrailSummary {
  *  - rejected: a *terminal* state meaning the document failed the FIBO
  *    ontology guardrail (either the pre-LLM document gate or the
  *    post-LLM process guardrail).
+ *  - awaiting_review: the HITL flow is paused at a wizard step waiting
+ *    for the user to review a stage's output and click "Next".
  */
 export type FileStatus =
   | 'pending'
   | 'uploading'
   | 'extracting'
   | 'validating'
+  | 'awaiting_review'
   | 'success'
   | 'rejected'
   | 'error';
+
+/**
+ * Logical wizard step inside the HITL ingestion flow. The four stages
+ * correspond 1:1 to the backend `/upload/session/...` endpoints:
+ *  - doc_gate     → POST /session/start  (FIBO document gate output)
+ *  - extraction   → POST /session/{id}/extract (raw LLM processes)
+ *  - guardrail    → POST /session/{id}/guardrail (post-LLM ontology trim)
+ *  - import       → POST /session/{id}/import (writes Neo4j)
+ */
+export type IngestionStep = 'doc_gate' | 'extraction' | 'guardrail' | 'import';
+
+/**
+ * One chunk that contributed evidence to a top FIBO concept during the
+ * pre-LLM document gate. Surfaced to the user in step 1 so they can
+ * see *why* the document was accepted.
+ */
+export interface EvidenceChunk {
+  chunk_index: number;
+  concept_iri?: string;
+  concept_label?: string;
+  concept_definition?: string;
+  score?: number;
+  matched_via?: string;
+  matched_synonym?: string | null;
+  passes_chunk_threshold?: boolean;
+  chunk_threshold?: number;
+  page?: number | string | null;
+  text: string;
+  excerpt?: string;
+}
 
 /**
  * Distinguishes a free-form `document` (PDF/DOCX/TXT — needs LLM + FIBO
@@ -110,6 +143,18 @@ interface UploadedFile {
   guardrail?: OntologyGuardrailSummary;
   ontology_status?: 'success' | 'document_rejected' | 'ontology_rejected';
   rejection_reason?: string;
+
+  // ---- Human-in-the-Loop wizard state ----
+  /** Backend session id, set the moment step 1 returns. */
+  session_id?: string;
+  /** Which wizard step the file is currently parked at. */
+  current_step?: IngestionStep;
+  /** Document chunks that drove the top FIBO concepts (step 1 evidence). */
+  evidence_chunks?: EvidenceChunk[];
+  /** Number of chunks the document was split into (step 1). */
+  chunk_count?: number;
+  /** Raw LLM output before the FIBO guardrail is applied (step 2). */
+  rawExtractedData?: ExtractedCapabilityModel;
 }
 
 const TABULAR_EXTENSIONS = ['.csv', '.xlsx', '.xls'];
@@ -117,34 +162,6 @@ const TABULAR_EXTENSIONS = ['.csv', '.xlsx', '.xls'];
 export function detectSourceType(fileName: string): SourceType {
   const lower = fileName.toLowerCase();
   return TABULAR_EXTENSIONS.some((ext) => lower.endsWith(ext)) ? 'tabular' : 'document';
-}
-
-interface ExtractionEvent {
-  status:
-    | 'started'
-    | 'cache_hit'
-    | 'loading'
-    | 'validating_document'
-    | 'document_validated'
-    | 'document_rejected'
-    | 'extracting'
-    | 'validating'
-    | 'ontology_applied'
-    | 'success'
-    | 'error';
-  progress?: number;
-  message?: string;
-  data?: ExtractedCapabilityModel | null;
-  output_path?: string;
-  chunks_path?: string;
-  filename?: string;
-  error?: string;
-  type?: string;
-  cached?: boolean;
-  ontology?: OntologyMeta;
-  document_relevance?: DocumentRelevance;
-  guardrail?: OntologyGuardrailSummary;
-  ontology_status?: 'success' | 'document_rejected' | 'ontology_rejected';
 }
 
 const INGESTION_STORAGE_KEY = 'compass_ingestion_files';
@@ -227,6 +244,10 @@ export function addFiles(newFiles: UploadedFile[]) {
 }
 
 export function removeFile(id: string) {
+  const target = cachedFiles.find((f) => f.id === id);
+  if (target?.session_id) {
+    void cancelSession(target.session_id);
+  }
   cachedFiles = cachedFiles.filter((f) => f.id !== id);
   saveFiles(cachedFiles);
   dropFileObject(id);
@@ -234,6 +255,14 @@ export function removeFile(id: string) {
 }
 
 export function clearAllFiles() {
+  // Best-effort cancel for every in-flight ingestion session. We still
+  // wipe local state immediately even if the network calls fail — the
+  // server's TTL-based janitor will clean up abandoned sessions.
+  for (const f of cachedFiles) {
+    if (f.session_id) {
+      void cancelSession(f.session_id);
+    }
+  }
   cachedFiles = [];
   saveFiles(cachedFiles);
   fileObjectCache.clear();
@@ -252,28 +281,55 @@ function setThinking(isThinking: boolean, message: string = '') {
 }
 
 /**
- * Public entry point: dispatches to either the LLM-backed document flow
- * (PDF/DOCX/TXT, with FIBO guardrail) or the tabular flow (CSV/XLSX,
- * parsed directly via the CSV import service — no LLM, no ontology).
+ * Callback fired the moment a HITL step completes and the wizard should
+ * (re-)open. The page passes one of these in to `startExtraction` so the
+ * modal can react to step transitions even if the user navigated away
+ * mid-run.
+ */
+export type WizardStepCallback = (
+  fileId: string,
+  step: IngestionStep,
+) => void;
+
+/**
+ * Public entry point: dispatches to either the document-driven HITL flow
+ * (PDF/DOCX/TXT — kicks off step 1: document chunking + FIBO doc gate)
+ * or the tabular flow (CSV/XLSX, parsed directly via the CSV import
+ * service — no LLM, no ontology, no wizard).
  *
- * Both flows ultimately populate `extractedData` with the same shape and
- * trigger `onModalOpen` with that single model — the popup looks identical.
+ * Both flows ultimately populate `extractedData` so the popup can render
+ * results uniformly. For the document flow the wizard handles steps 2-4
+ * via {@link runExtractionStep}, {@link runGuardrailStep}, and
+ * {@link runImportStep}.
  */
 export async function startExtraction(
   file: UploadedFile,
   actualFile: File,
   vertical: string,
   subVertical: string,
+  capability: string,
   depth: string,
-  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
+  onWizardStep: WizardStepCallback,
 ) {
   registerFileObject(file.id, actualFile);
 
   const sourceType = detectSourceType(file.name);
   if (sourceType === 'tabular') {
-    return startTabularExtraction(file, actualFile, onModalOpen);
+    return startTabularExtraction(file, actualFile, (_data, fileId) => {
+      // Tabular files skip the wizard entirely — open the modal at the
+      // import step so the user can review and click "Import to Graph".
+      onWizardStep(fileId, 'import');
+    });
   }
-  return startDocumentExtraction(file, actualFile, vertical, subVertical, depth, onModalOpen);
+  return startHitlDocumentSession(
+    file,
+    actualFile,
+    vertical,
+    subVertical,
+    capability,
+    depth,
+    onWizardStep,
+  );
 }
 
 /**
@@ -330,6 +386,7 @@ async function startTabularExtraction(
       sourceType: 'tabular',
       extractedData: model,
       ontology_status: 'success',
+      current_step: 'import',
     });
     setThinking(false);
 
@@ -362,18 +419,43 @@ async function startTabularExtraction(
   }
 }
 
-async function startDocumentExtraction(
+// ---------------------------------------------------------------------------
+// Human-in-the-Loop ingestion flow (PDF / DOCX / TXT)
+//
+// The document flow is split into 4 wizard steps backed by the new
+// `/upload/session/...` endpoints. Each step is a stand-alone async
+// function so the page can drive it from a "Next" button:
+//
+//   1. startHitlDocumentSession   → POST /upload/session/start
+//   2. runExtractionStep          → POST /upload/session/{id}/extract
+//   3. runGuardrailStep           → POST /upload/session/{id}/guardrail
+//   4. runImportStep              → POST /upload/session/{id}/import
+//
+// Cancellation: abandoning a session (page reload, "Clear") fires a
+// best-effort POST /upload/session/{id}/cancel so the backend can drop
+// the temp file. We DO NOT rely on the cancel call to succeed (offline
+// users / closed tab / server restart) — the backend GC reaps stale
+// sessions after `SESSION_TTL_SECONDS`.
+// ---------------------------------------------------------------------------
+
+async function startHitlDocumentSession(
   file: UploadedFile,
   actualFile: File,
   vertical: string,
   subVertical: string,
+  capability: string,
   depth: string,
-  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
+  onWizardStep: WizardStepCallback,
 ) {
   const controller = new AbortController();
   activeExtractions.set(file.id, controller);
 
-  updateFile(file.id, { status: 'uploading', progress: 10, sourceType: 'document' });
+  updateFile(file.id, {
+    status: 'validating',
+    progress: 15,
+    sourceType: 'document',
+  });
+  setThinking(true, 'Uploading document and validating against FIBO ontology...');
 
   const formData = new FormData();
   formData.append('file', actualFile);
@@ -381,9 +463,13 @@ async function startDocumentExtraction(
   const params = new URLSearchParams();
   if (vertical.trim()) params.append('vertical', vertical.trim());
   if (subVertical.trim()) params.append('subvertical', subVertical.trim());
+  if (capability.trim()) params.append('capability', capability.trim());
   params.append('extraction_depth', depth);
 
-  const url = `${API_BASE}/upload/pdf${params.toString() ? `?${params.toString()}` : ''}`;
+  const url = `${API_BASE}/upload/session/start${
+    params.toString() ? `?${params.toString()}` : ''
+  }`;
+
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -392,49 +478,80 @@ async function startDocumentExtraction(
     });
 
     if (!response.ok) {
-      throw new Error(`Upload failed: ${response.statusText}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-
-      for (let i = 0; i < lines.length - 1; i++) {
-        if (lines[i].trim()) {
-          try {
-            const event: ExtractionEvent = JSON.parse(lines[i]);
-            handleExtractionEvent(file.id, file.name, event, onModalOpen);
-          } catch (e) {
-            console.error('Failed to parse event:', e);
-          }
-        }
-      }
-
-      buffer = lines[lines.length - 1];
-    }
-
-    if (buffer.trim()) {
+      let detail = `Upload failed: ${response.statusText}`;
       try {
-        const event: ExtractionEvent = JSON.parse(buffer);
-        handleExtractionEvent(file.id, file.name, event, onModalOpen);
-      } catch (e) {
-        console.error('Failed to parse final event:', e);
+        const err = await response.json();
+        if (err?.detail) detail = err.detail;
+      } catch {
+        // body not JSON
       }
+      throw new Error(detail);
     }
-  } catch (error: any) {
-    if (error.name === 'AbortError') {
-      console.log('Extraction aborted for', file.id);
+
+    const payload = await response.json();
+    const docGateRejected =
+      payload.is_relevant === false &&
+      payload.doc_gate?.available !== false; // unavailable gate is treated as "pass"
+
+    if (docGateRejected) {
+      const reason =
+        payload.rejection_reason ||
+        payload.doc_gate?.relevance?.rejection_reason ||
+        'Document does not align with the FIBO ontology.';
+      updateFile(file.id, {
+        status: 'rejected',
+        progress: 100,
+        sourceType: 'document',
+        session_id: payload.session_id,
+        current_step: 'doc_gate',
+        ontology: payload.ontology,
+        document_relevance: payload.document_relevance,
+        evidence_chunks: payload.evidence_chunks,
+        chunk_count: payload.chunk_count,
+        chunks_path: payload.chunks_path,
+        ontology_status: 'document_rejected',
+        rejection_reason: reason,
+        extractedData: {
+          name: file.name,
+          description: '',
+          vertical: '',
+          processes: [],
+        },
+      });
+      pendingRejection = { fileId: file.id, fileName: file.name, reason };
+      setThinking(false);
+      // Best-effort cleanup of the rejected session.
+      void cancelSession(payload.session_id);
+      try {
+        onWizardStep(file.id, 'doc_gate');
+      } catch {
+        // page navigated away — the periodic poll on the page will pick this up
+      }
       return;
     }
+
+    updateFile(file.id, {
+      status: 'awaiting_review',
+      progress: 35,
+      sourceType: 'document',
+      session_id: payload.session_id,
+      current_step: 'doc_gate',
+      ontology: payload.ontology,
+      document_relevance: payload.document_relevance,
+      evidence_chunks: payload.evidence_chunks,
+      chunk_count: payload.chunk_count,
+      chunks_path: payload.chunks_path,
+      ontology_status: 'success',
+    });
+    setThinking(false);
+
+    try {
+      onWizardStep(file.id, 'doc_gate');
+    } catch {
+      // ignore — modal will reopen on next mount via the periodic check
+    }
+  } catch (error: any) {
+    if (error?.name === 'AbortError') return;
     console.error('Upload error:', error);
     const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
     updateFile(file.id, { status: 'error', error: errorMsg });
@@ -448,225 +565,235 @@ async function startDocumentExtraction(
 }
 
 /**
- * Translate the backend's verbose `ontology_status` / event payload into
- * a short human-readable rejection reason for the UI.
+ * Step 2 — run the LLM extractor on the session's chunks. Pure
+ * server-side call; the result is the raw extracted capability model
+ * (no FIBO guardrail yet).
  */
-function buildRejectionReason(event: ExtractionEvent): string {
-  // 1. Pre-LLM document gate rejection
-  if (event.status === 'document_rejected' || event.ontology_status === 'document_rejected') {
-    if (event.document_relevance?.rejection_reason) {
-      return event.document_relevance.rejection_reason;
-    }
-    if (event.message) return event.message;
-    return 'Document does not align with the FIBO ontology.';
+export async function runExtractionStep(fileId: string): Promise<void> {
+  const file = cachedFiles.find((f) => f.id === fileId);
+  if (!file?.session_id) {
+    throw new Error('No active ingestion session for this file.');
   }
 
-  // 2. Post-LLM guardrail rejection (LLM ran but no process passed)
-  if (event.ontology_status === 'ontology_rejected') {
-    const candidates = event.guardrail?.candidate_count ?? 0;
-    const threshold = event.guardrail?.threshold;
-    return (
-      `LLM extracted ${candidates} candidate process(es) but none aligned with` +
-      ` any FIBO ontology concept above the` +
-      `${threshold !== undefined ? ` ${threshold.toFixed(2)}` : ''} threshold.`
+  updateFile(fileId, { status: 'extracting', progress: 55 });
+  setThinking(true, 'Running LLM extraction on document chunks...');
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/upload/session/${file.session_id}/extract`,
+      { method: 'POST' },
     );
-  }
+    if (!response.ok) {
+      let detail = `Extraction failed: ${response.statusText}`;
+      try {
+        const err = await response.json();
+        if (err?.detail) detail = err.detail;
+      } catch {
+        // not JSON
+      }
+      throw new Error(detail);
+    }
 
-  return event.message || 'Document rejected by the ontology guardrail.';
+    const payload = await response.json();
+    const extracted: ExtractedCapabilityModel = payload.extracted_data;
+
+    updateFile(fileId, {
+      status: 'awaiting_review',
+      progress: 70,
+      current_step: 'extraction',
+      rawExtractedData: extracted,
+      extractedData: extracted,
+    });
+    setThinking(false);
+  } catch (error: any) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    updateFile(fileId, { status: 'error', error: errorMsg });
+    setThinking(false);
+    throw error;
+  }
 }
 
 /**
- * Decide whether a `success` event from the backend should actually be
- * treated as a rejection by the UI.
- *
- * The backend keeps `status: "success"` for the *streaming envelope* even
- * when no process passes the guardrail (so existing clients don't break),
- * and signals the real outcome via `ontology_status` and `processes: []`.
+ * Step 3 — apply the FIBO post-extraction guardrail and trim the model
+ * to the accepted processes. Updates the file's `extractedData` to the
+ * guardrail-filtered version while keeping `rawExtractedData` for diff
+ * comparison if the UI wants it.
  */
-function isRejectedSuccess(event: ExtractionEvent): boolean {
-  if (event.ontology_status === 'document_rejected' || event.ontology_status === 'ontology_rejected') {
-    return true;
+export async function runGuardrailStep(fileId: string): Promise<void> {
+  const file = cachedFiles.find((f) => f.id === fileId);
+  if (!file?.session_id) {
+    throw new Error('No active ingestion session for this file.');
   }
-  // Defensive: if data is empty, treat as rejection.
-  if (event.data && Array.isArray(event.data.processes) && event.data.processes.length === 0) {
-    return true;
-  }
-  return false;
-}
 
-function handleExtractionEvent(
-  fileId: string,
-  fileName: string,
-  event: ExtractionEvent,
-  onModalOpen: (data: ExtractedCapabilityModel, fileId: string) => void,
-) {
-  switch (event.status) {
-    case 'started':
-      updateFile(fileId, { status: 'uploading', progress: 5 });
-      setThinking(true, 'Starting extraction...');
-      break;
+  updateFile(fileId, { status: 'validating', progress: 85 });
+  setThinking(true, 'Applying FIBO ontology guardrail to extracted processes...');
 
-    case 'loading':
-      updateFile(fileId, {
-        status: 'extracting',
-        progress: Math.min(event.progress || 30, 50),
-      });
-      setThinking(true, event.message || 'Loading document...');
-      break;
+  try {
+    const response = await fetch(
+      `${API_BASE}/upload/session/${file.session_id}/guardrail`,
+      { method: 'POST' },
+    );
+    if (!response.ok) {
+      let detail = `Guardrail failed: ${response.statusText}`;
+      try {
+        const err = await response.json();
+        if (err?.detail) detail = err.detail;
+      } catch {
+        // not JSON
+      }
+      throw new Error(detail);
+    }
 
-    case 'validating_document':
-      updateFile(fileId, {
-        status: 'validating',
-        progress: Math.min(event.progress || 38, 50),
-      });
-      setThinking(true, event.message || 'Validating document against FIBO ontology...');
-      break;
+    const payload = await response.json();
+    const annotated: ExtractedCapabilityModel = payload.annotated_data;
+    const ontologyStatus = payload.ontology_status as
+      | 'success'
+      | 'ontology_rejected';
 
-    case 'document_validated':
-      updateFile(fileId, {
-        status: 'validating',
-        progress: Math.min(event.progress || 40, 50),
-        ontology: event.ontology,
-        document_relevance: event.document_relevance,
-      });
-      setThinking(true, event.message || 'Document validated. Starting LLM extraction...');
-      break;
-
-    case 'document_rejected': {
-      const reason = buildRejectionReason(event);
+    if (ontologyStatus === 'ontology_rejected') {
+      const candidates = payload.guardrail?.candidate_count ?? 0;
+      const threshold = payload.guardrail?.threshold;
+      const reason =
+        `LLM extracted ${candidates} candidate process(es) but none aligned with` +
+        ` any FIBO ontology concept above the` +
+        `${threshold !== undefined ? ` ${threshold.toFixed(2)}` : ''} threshold.`;
       updateFile(fileId, {
         status: 'rejected',
         progress: 100,
-        ontology: event.ontology,
-        document_relevance: event.document_relevance,
-        ontology_status: 'document_rejected',
+        current_step: 'guardrail',
+        extractedData: annotated,
+        ontology: payload.ontology,
+        guardrail: payload.guardrail,
+        document_relevance: payload.document_relevance,
+        ontology_status: 'ontology_rejected',
         rejection_reason: reason,
-        // Synthesise a minimal extractedData so the modal has something to
-        // show (filename + reason); processes array is intentionally empty.
-        extractedData: event.data || {
-          name: fileName,
-          description: '',
-          vertical: '',
-          processes: [],
-        },
       });
-      pendingRejection = { fileId, fileName, reason };
+      pendingRejection = { fileId, fileName: file.name, reason };
       setThinking(false);
-      break;
+      // Server has nothing else to do for a rejected guardrail run.
+      void cancelSession(file.session_id);
+      return;
     }
 
-    case 'extracting':
-      updateFile(fileId, {
-        status: 'extracting',
-        progress: Math.min(event.progress || 60, 95),
-      });
-      setThinking(true, event.message || 'LLM extracting capabilities...');
-      break;
+    updateFile(fileId, {
+      status: 'awaiting_review',
+      progress: 95,
+      current_step: 'guardrail',
+      extractedData: annotated,
+      ontology: payload.ontology,
+      guardrail: payload.guardrail,
+      document_relevance: payload.document_relevance,
+      chunks_path: payload.chunks_path,
+      ontology_status: 'success',
+    });
+    setThinking(false);
+  } catch (error: any) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    updateFile(fileId, { status: 'error', error: errorMsg });
+    setThinking(false);
+    throw error;
+  }
+}
 
-    case 'validating':
-      updateFile(fileId, {
-        status: 'extracting',
-        progress: Math.min(event.progress || 80, 95),
-      });
-      setThinking(true, event.message || 'Validating extracted processes...');
-      break;
+/**
+ * Optional process/subprocess selection sent to the import endpoint when
+ * the user has unchecked items in the preview. ``selected_process_indices``
+ * indexes into the guardrail-approved processes returned in step 3, and
+ * ``selected_subprocess_indices`` indexes into each process's subprocesses.
+ * Omit either key to import "all" at that level.
+ */
+export interface ImportSelection {
+  selected_process_indices?: number[];
+  selected_subprocess_indices?: Record<string, number[]>;
+}
 
-    case 'ontology_applied':
-      updateFile(fileId, {
-        status: 'extracting',
-        progress: Math.min(event.progress || 90, 98),
-        ontology: event.ontology,
-        guardrail: event.guardrail,
-      });
-      setThinking(true, event.message || 'FIBO ontology applied to extracted processes.');
-      break;
+/**
+ * Step 4 — persist the guardrail-approved model into Neo4j. Returns the
+ * import summary so the caller can render counts.
+ *
+ * Pass ``selection`` to narrow the imported model to a subset of the
+ * guardrail-approved processes/subprocesses (driven by checkboxes in the
+ * preview). When omitted, the full guardrail output is imported.
+ */
+export async function runImportStep(
+  fileId: string,
+  selection?: ImportSelection,
+): Promise<any> {
+  const file = cachedFiles.find((f) => f.id === fileId);
+  if (!file?.session_id) {
+    throw new Error('No active ingestion session for this file.');
+  }
 
-    case 'cache_hit': {
-      // Cache hit: still re-applies the post-LLM guardrail server-side. Treat
-      // identically to `success` here — the same rejection rules apply.
-      const rejected = isRejectedSuccess(event);
-      const finalData = event.data ?? undefined;
-      if (rejected) {
-        const reason = buildRejectionReason(event);
-        updateFile(fileId, {
-          status: 'rejected',
-          progress: 100,
-          extractedData: finalData,
-          ontology: event.ontology,
-          guardrail: event.guardrail,
-          ontology_status: event.ontology_status || 'ontology_rejected',
-          rejection_reason: reason,
-        });
-        pendingRejection = { fileId, fileName, reason };
-        setThinking(false);
-      } else {
-        updateFile(fileId, {
-          status: 'success',
-          progress: 100,
-          extractedData: finalData,
-          ontology: event.ontology,
-          guardrail: event.guardrail,
-          ontology_status: 'success',
-        });
-        setThinking(false);
-        if (finalData) {
-          try {
-            onModalOpen(finalData, fileId);
-          } catch (e) {
-            pendingModalData = { data: finalData, fileId };
-          }
-        }
+  setThinking(true, 'Importing capabilities into Neo4j...');
+  try {
+    const hasSelection =
+      !!selection &&
+      (selection.selected_process_indices !== undefined ||
+        (selection.selected_subprocess_indices &&
+          Object.keys(selection.selected_subprocess_indices).length > 0));
+
+    const response = await fetch(
+      `${API_BASE}/upload/session/${file.session_id}/import`,
+      {
+        method: 'POST',
+        headers: hasSelection ? { 'Content-Type': 'application/json' } : undefined,
+        body: hasSelection ? JSON.stringify(selection) : undefined,
+      },
+    );
+    if (!response.ok) {
+      let detail = `Import failed: ${response.statusText}`;
+      try {
+        const err = await response.json();
+        if (err?.detail) detail = err.detail;
+      } catch {
+        // not JSON
       }
-      break;
+      throw new Error(detail);
     }
+    const payload = await response.json();
+    updateFile(fileId, {
+      status: 'success',
+      progress: 100,
+      current_step: 'import',
+    });
+    setThinking(false);
+    return payload.summary || {};
+  } catch (error: any) {
+    setThinking(false);
+    throw error;
+  }
+}
 
-    case 'success': {
-      const rejected = isRejectedSuccess(event);
-      const finalData = event.data ?? undefined;
+/**
+ * Mark a file as successfully imported.
+ *
+ * Used by the page-level "combined import" flow when several documents
+ * are merged under one capability name and persisted via a single
+ * ``/upload/import-to-graph`` call. Each contributing file is finalised
+ * here so the UI status pill flips from "Review guardrail" to "Done"
+ * without going through the per-file ``runImportStep`` path.
+ */
+export function markFileImported(fileId: string): void {
+  updateFile(fileId, {
+    status: 'success',
+    progress: 100,
+    current_step: 'import',
+  });
+}
 
-      if (rejected) {
-        const reason = buildRejectionReason(event);
-        updateFile(fileId, {
-          status: 'rejected',
-          progress: 100,
-          extractedData: finalData,
-          ontology: event.ontology,
-          document_relevance: event.document_relevance,
-          guardrail: event.guardrail,
-          ontology_status: event.ontology_status || 'ontology_rejected',
-          rejection_reason: reason,
-          chunks_path: event.chunks_path,
-        });
-        pendingRejection = { fileId, fileName, reason };
-        setThinking(false);
-        break;
-      }
-
-      if (finalData) {
-        updateFile(fileId, {
-          status: 'success',
-          progress: 100,
-          extractedData: finalData,
-          chunks_path: event.chunks_path,
-          ontology: event.ontology,
-          document_relevance: event.document_relevance,
-          guardrail: event.guardrail,
-          ontology_status: 'success',
-        });
-        setThinking(false);
-        try {
-          onModalOpen(finalData, fileId);
-        } catch (e) {
-          pendingModalData = { data: finalData, fileId };
-        }
-      }
-      break;
-    }
-
-    case 'error':
-      updateFile(fileId, { status: 'error', error: event.error });
-      setThinking(false);
-      break;
+/**
+ * Best-effort cancel: drops the backend session so the temp upload is
+ * deleted promptly. Errors are swallowed because the GC reaps abandoned
+ * sessions automatically after the TTL window.
+ */
+export async function cancelSession(sessionId?: string): Promise<void> {
+  if (!sessionId) return;
+  try {
+    await fetch(`${API_BASE}/upload/session/${sessionId}/cancel`, {
+      method: 'POST',
+    });
+  } catch (e) {
+    console.warn('Failed to cancel ingestion session:', e);
   }
 }
 

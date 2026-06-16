@@ -16,7 +16,7 @@ import asyncio
 import tempfile
 import hashlib
 import time
-from typing import List, Dict, AsyncGenerator, Optional
+from typing import Any, List, Dict, AsyncGenerator, Optional
 from pathlib import Path
 from datetime import datetime
 from deepagents import create_deep_agent
@@ -64,19 +64,29 @@ def _compute_file_hash(file_path: str) -> str:
         return None
 
 
-def _compute_config_hash(vertical: Optional[str], subvertical: Optional[str], extraction_depth: str) -> str:
+def _compute_config_hash(
+    vertical: Optional[str],
+    subvertical: Optional[str],
+    extraction_depth: str,
+    capability: Optional[str] = None,
+) -> str:
     """
     Compute hash of extraction configuration parameters.
-    
+
     Args:
         vertical: Vertical name
         subvertical: SubVertical name
         extraction_depth: Extraction depth level
-        
+        capability: Optional user-provided capability name override. Included
+            in the hash so that the same document re-extracted under a
+            different capability name produces a distinct cache entry.
+
     Returns:
         Hexadecimal hash string
     """
-    config_str = f"{vertical or ''}|{subvertical or ''}|{extraction_depth}"
+    config_str = (
+        f"{vertical or ''}|{subvertical or ''}|{extraction_depth}|{capability or ''}"
+    )
     return hashlib.sha256(config_str.encode()).hexdigest()
 
 
@@ -1231,6 +1241,315 @@ async def extract_capability_model(
             "error": str(e),
             "type": type(e).__name__
         }
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-Loop (HITL) — per-stage extraction primitives
+#
+# The streaming `extract_capability_model` runs every stage end-to-end. The
+# Compass UI now drives ingestion as a 3-step wizard so a human can review
+# the FIBO document gate, then the raw LLM extraction, then the guardrail
+# before anything lands in Neo4j. Each helper below corresponds to one of
+# those stages and is a plain async function (no streaming) so the upload
+# routes can drive them from a session state machine.
+# ---------------------------------------------------------------------------
+
+
+def prepare_chunks_and_gate(
+    file_path: str,
+    extraction_depth: str = "data_element",
+    skip_embeddings: bool = True,
+) -> Dict:
+    """Stage 1 of the HITL flow: load chunks, save them, run FIBO document gate.
+
+    Does NOT call the LLM. Returns everything the UI needs to decide whether
+    to proceed to extraction:
+
+        {
+          "filename":          basename of the source document,
+          "file_hash":         sha256 of the raw bytes (used for caching),
+          "chunks":            list[{"text", "metadata"}] — kept in memory
+                                 so step 2 can pass it straight to the agent,
+          "chunk_count":       int,
+          "chunks_path":       on-disk JSON (also used by import-to-graph),
+          "doc_gate":          full payload from `_validate_document_against_ontology`,
+          "is_relevant":       bool — short-circuit for step 2,
+          "rejection_reason":  optional human-readable reason,
+          "evidence_chunks":   list[{ "text", "score", "concept_label",
+                                       "concept_iri", "chunk_index" }] — the
+                                  passed/matching chunks the user is shown
+                                  in step 1.
+        }
+
+    The chunks file is persisted now (rather than at the end of the run) so
+    the user can always re-import or inspect it.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    file_hash = _compute_file_hash(file_path)
+
+    chunks = load_document(file_path)
+    chunk_count = len(chunks)
+
+    if skip_embeddings:
+        chunks = skip_embedding_chunks(chunks)
+    else:
+        chunks = embed_chunks(chunks)
+
+    source_filename = Path(file_path).stem
+    chunks_path = save_document_chunks(chunks, source_filename)
+
+    doc_gate = _validate_document_against_ontology(chunks)
+    relevance = doc_gate.get("relevance") or {}
+    top_concepts = relevance.get("top_concepts") or []
+    chunk_threshold = relevance.get("chunk_threshold", 0.0)
+
+    evidence_chunks = _build_evidence_chunks(
+        top_concepts, chunks, chunk_threshold
+    )
+
+    logger.info(
+        "[HITL Stage 1] '%s': %d chunks, gate=%s, top_concepts=%d, evidence=%d",
+        os.path.basename(file_path),
+        chunk_count,
+        doc_gate.get("is_relevant"),
+        len(top_concepts),
+        len(evidence_chunks),
+    )
+
+    return {
+        "filename": os.path.basename(file_path),
+        "file_hash": file_hash,
+        "chunks": chunks,
+        "chunk_count": chunk_count,
+        "chunks_path": chunks_path,
+        "doc_gate": doc_gate,
+        "is_relevant": bool(doc_gate.get("is_relevant")),
+        "rejection_reason": doc_gate.get("rejection_reason"),
+        "evidence_chunks": evidence_chunks,
+        "extraction_depth": extraction_depth,
+    }
+
+
+def _build_evidence_chunks(
+    top_concepts: List[Dict[str, Any]],
+    chunks: List[Dict[str, Any]],
+    chunk_threshold: float,
+) -> List[Dict[str, Any]]:
+    """Pick the document chunks that drove each top FIBO concept's score.
+
+    The UI's step 1 shows the user *why* the document was accepted. For
+    each top concept we surface the chunk that scored highest against it
+    (its ``best_chunk_index``), with score, the matched chunk text, and a
+    short excerpt. Duplicates are de-duplicated by ``(chunk_index, concept_iri)``
+    so a chunk is only shown once.
+    """
+    evidence: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for hit in top_concepts:
+        chunk_idx = hit.get("best_chunk_index")
+        concept_iri = hit.get("concept_iri")
+        if chunk_idx is None or chunk_idx < 0 or chunk_idx >= len(chunks):
+            continue
+        key = (chunk_idx, concept_iri)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        chunk = chunks[chunk_idx]
+        text = (chunk.get("text") or "").strip()
+        evidence.append({
+            "chunk_index": chunk_idx,
+            "concept_iri": concept_iri,
+            "concept_label": hit.get("concept_label"),
+            "concept_definition": hit.get("concept_definition"),
+            "score": hit.get("best_chunk_score"),
+            "matched_via": hit.get("matched_via"),
+            "matched_synonym": hit.get("matched_synonym"),
+            "passes_chunk_threshold": (
+                hit.get("best_chunk_score") is not None
+                and hit.get("best_chunk_score") >= chunk_threshold
+            ),
+            "chunk_threshold": chunk_threshold,
+            "page": (chunk.get("metadata") or {}).get("page"),
+            "text": text,
+            "excerpt": (text[:600] + "...") if len(text) > 600 else text,
+        })
+
+    return evidence
+
+
+def run_llm_extraction(
+    chunks: List[Dict],
+    doc_gate: Dict,
+    vertical: Optional[str] = None,
+    subvertical: Optional[str] = None,
+    extraction_depth: str = "data_element",
+    file_hash: Optional[str] = None,
+    capability: Optional[str] = None,
+) -> Dict:
+    """Stage 2 of the HITL flow: run the DeepAgent extractor on the chunks.
+
+    Returns the *raw* extracted model BEFORE the FIBO post-extraction
+    guardrail is applied. The UI shows this to the user for approval; the
+    guardrail is applied in stage 3 only after the user clicks "Next".
+
+    A best-effort cache lookup uses the file_hash + config_hash pair so a
+    repeat run on the same document doesn't re-pay for the LLM call.
+
+    When ``capability`` is provided the LLM is instructed to use that as
+    the capability name, and the resulting model's ``name`` is forced to
+    match so downstream process/subprocess extraction is scoped to that
+    capability instead of one the LLM might guess from the document.
+    """
+    capability_clean = (capability or "").strip() or None
+    config_hash = _compute_config_hash(
+        vertical, subvertical, extraction_depth, capability_clean,
+    )
+
+    if file_hash and config_hash:
+        cached = _get_cached_extraction(file_hash, config_hash)
+        if cached:
+            logger.info("[HITL Stage 2] Cache hit — returning cached extraction")
+            cached = _enforce_depth(cached, extraction_depth)
+            if vertical:
+                cached["vertical"] = vertical
+            if subvertical:
+                cached["subvertical"] = subvertical
+            if capability_clean:
+                cached["name"] = capability_clean
+            return cached
+
+    depth_instructions = _build_depth_instruction(extraction_depth)
+    focus_instructions = (doc_gate.get("focus_prompt") or "")
+    agent_instructions = EXTRACTION_INSTRUCTIONS + focus_instructions + depth_instructions
+
+    agent = build_extraction_agent(chunks)
+    agent.system_prompt = agent_instructions
+
+    output_dir = "Json_Documents"
+    output_path = os.path.join(output_dir, "extracted_capability_model.json")
+
+    task_parts = [
+        "The document has been pre-loaded and chunked. The chunks are available to you via the get_cached_chunks tool.",
+        "Your task:",
+        "1) Call tool=get_cached_chunks (no parameters needed) to retrieve the pre-loaded chunks.",
+        "2) Analyze all chunks and construct the JSON capability model per OUTPUT CONTRACT.",
+        "\nMANDATORY CONFIGURATION (MUST FOLLOW):",
+    ]
+    if vertical:
+        task_parts.append(f"- VERTICAL NAME: Set to '{vertical}' (user-provided, do not override)")
+    if subvertical:
+        task_parts.append(f"- SUBVERTICAL NAME: Set to '{subvertical}' (user-provided, do not override)")
+    if capability_clean:
+        task_parts.append(
+            f"- CAPABILITY NAME: Set the top-level `name` field to '{capability_clean}' "
+            f"(user-provided, do not override). All processes and subprocesses you "
+            f"extract MUST belong to this capability — only include processes that are "
+            f"clearly part of '{capability_clean}'."
+        )
+    task_parts.append(
+        f"- EXTRACTION DEPTH: {extraction_depth} (STRICT - do not extract beyond this level)"
+    )
+    task_parts.append(f"\n3) Call tool=write_json with path=`{output_path}` and the JSON object.")
+    task = "\n".join(task_parts)
+
+    logger.info(
+        f"[HITL Stage 2] Running LLM agent (depth={extraction_depth}, "
+        f"capability={capability_clean!r})"
+    )
+    result = agent.invoke({"messages": [{"role": "user", "content": task}]})
+    final_msg = result["messages"][-1].content if "messages" in result else str(result)
+
+    extracted_data: Optional[Dict] = None
+    try:
+        extracted_data = json.loads(final_msg)
+    except json.JSONDecodeError:
+        import re
+        match = re.search(r"\{.*\}", final_msg, re.DOTALL)
+        if match:
+            try:
+                extracted_data = json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+    if not extracted_data:
+        raise ValueError(
+            "Failed to extract valid JSON from LLM response. "
+            f"First 500 chars: {final_msg[:500]}"
+        )
+
+    if vertical:
+        extracted_data["vertical"] = vertical
+    if subvertical:
+        extracted_data["subvertical"] = subvertical
+    if capability_clean:
+        extracted_data["name"] = capability_clean
+
+    extracted_data = _enforce_depth(extracted_data, extraction_depth)
+
+    if file_hash and config_hash:
+        try:
+            _save_extraction_to_cache(file_hash, config_hash, extracted_data)
+        except Exception as cache_exc:
+            logger.warning(f"[HITL Stage 2] Failed to cache extraction: {cache_exc}")
+
+    return extracted_data
+
+
+def apply_guardrail_to_extraction(
+    extracted_data: Dict,
+    doc_gate: Optional[Dict] = None,
+    document_top_concept_iris: Optional[List[str]] = None,
+) -> Dict:
+    """Stage 3 of the HITL flow: apply the FIBO guardrail to the extraction.
+
+    ``document_top_concept_iris`` may be passed directly; if not, they are
+    extracted from ``doc_gate.relevance.top_concepts`` (Stage 1 output).
+
+    Returns:
+        {
+          "annotated_data":   <model trimmed to accepted processes only>,
+          "ontology":         <ontology metadata>,
+          "guardrail":        <full guardrail summary>,
+          "accepted":         <list[GuardrailMatch.to_dict()]>,
+          "rejected":         <list[GuardrailMatch.to_dict()]>,
+          "ontology_status":  "success" | "ontology_rejected",
+          "available":        <bool — whether the ontology service was usable>,
+        }
+    """
+    if document_top_concept_iris is None:
+        relevance = (doc_gate or {}).get("relevance") or {}
+        document_top_concept_iris = [
+            c.get("concept_iri")
+            for c in (relevance.get("top_concepts") or [])
+            if c.get("concept_iri")
+        ]
+
+    guardrail = _apply_ontology_guardrail(
+        extracted_data,
+        capability_name=extracted_data.get("name"),
+        document_top_concept_iris=document_top_concept_iris,
+    )
+
+    annotated_data = guardrail["annotated_data"]
+    final_status = (
+        "success"
+        if (not guardrail["available"]) or guardrail["accepted"]
+        else "ontology_rejected"
+    )
+
+    return {
+        "annotated_data": annotated_data,
+        "ontology": guardrail["ontology_meta"],
+        "guardrail": guardrail["guardrail_summary"],
+        "accepted": guardrail["accepted"],
+        "rejected": guardrail["rejected"],
+        "ontology_status": final_status,
+        "available": guardrail["available"],
+    }
 
 
 def validate_extracted_model(model: Dict) -> tuple[bool, List[str]]:
