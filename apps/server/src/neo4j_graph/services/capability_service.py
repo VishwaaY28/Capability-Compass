@@ -48,6 +48,8 @@ class CapabilityService:
         OPTIONAL MATCH (p)-[:DECOMPOSES]->(sp:Subprocess)
         OPTIONAL MATCH (sp)-[:USES_DATA]->(de:DataEntity)
         OPTIONAL MATCH (de)-[:HAS_ELEMENT]->(elem:DataElements)
+        OPTIONAL MATCH (c)-[:ACCOUNTABLE]->(ou:OrganizationUnit)
+        OPTIONAL MATCH (sp)-[:SUPPORTED_BY]->(app:ApplicationCatalog)
         RETURN c, v.name AS vertical, sv.name AS subvertical,
                collect(DISTINCT {
                    id: p.uid, name: p.name, level: p.level, 
@@ -64,7 +66,13 @@ class CapabilityService:
                collect(DISTINCT {
                    id: elem.uid, name: elem.name, description: elem.data_element_description,
                    data_entity_id: de.uid
-               }) AS data_elements
+               }) AS data_elements,
+               collect(DISTINCT {
+                   id: ou.uid, name: ou.name
+               }) AS org_units,
+               collect(DISTINCT {
+                   id: app.uid, name: app.name, subprocess_id: sp.uid
+               }) AS applications
         """
         svc = Neo4jQueryService()
         try:
@@ -88,6 +96,10 @@ class CapabilityService:
                         "subprocesses": []
                     }
             
+            org_unit_names = sorted({
+                ou["name"] for ou in r["org_units"] if ou.get("id") and ou.get("name")
+            })
+
             subprocesses_map = {}
             for sp in r["subprocesses"]:
                 if sp["id"]:
@@ -96,10 +108,15 @@ class CapabilityService:
                         "name": sp["name"],
                         "description": sp["description"],
                         "category": sp["category"],
-                        "data_entities": []
+                        "data_entities": [],
+                        "applications": [],
                     }
                     if sp["process_id"] in processes_map:
                         processes_map[sp["process_id"]]["subprocesses"].append(subprocesses_map[sp["id"]])
+
+            for app in r["applications"]:
+                if app.get("id") and app.get("subprocess_id") in subprocesses_map:
+                    subprocesses_map[app["subprocess_id"]]["applications"].append(app["name"])
             
             data_entities_map = {}
             for de in r["data_entities"]:
@@ -121,12 +138,16 @@ class CapabilityService:
                         "data_element_description": elem["description"]
                     })
             
+            for sp in subprocesses_map.values():
+                sp["applications"] = sorted(set(sp["applications"]))
+
             return {
                 "id": cap["uid"],
                 "name": cap["name"],
                 "description": cap.get("description", ""),
                 "vertical": r.get("vertical"),
                 "subvertical": r.get("subvertical"),
+                "org_units": org_unit_names,
                 "processes": list(processes_map.values())
             }
         finally:

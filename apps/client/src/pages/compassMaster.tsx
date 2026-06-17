@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { FiEye, FiEdit2, FiEdit3, FiPlus, FiChevronRight, FiChevronDown, FiLayers, FiTrash2 } from 'react-icons/fi'
 import { Toaster, toast } from 'react-hot-toast'
-import { API_BASE } from '../utils/apiBase';
+import { apiUrl } from '../utils/apiBase';
 
 import { useCapabilityApi } from '../hooks/useCapability';
 import type { Capability, Process, Vertical, SubVertical } from '../hooks/useCapability';
@@ -254,40 +254,36 @@ export default function Home() {
       setIsExporting(true);
       const ids = Array.from(selectedExportCapIds);
 
-      if (ids.length === 1) {
-        // Single export - download directly
-        const res = await fetch(`${API_BASE}/export/capability/${ids[0]}/csv`);        if (!res.ok) throw new Error((await res.text()) || 'Export failed');
-        const blob = await res.blob();
+      const downloadCsv = (blob: Blob, filename: string) => {
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
-        const cap = capabilities.find((c) => c.id === ids[0]);
         a.href = url;
-        a.download = cap ? `${cap.name.replace(/\s+/g, '_')}_export.csv` : `capability_${ids[0]}_export.csv`;
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         a.remove();
         window.URL.revokeObjectURL(url);
-      } else {
-        // Multi export - download each file sequentially
-        for (const id of ids) {
-          const res = await fetch(`${API_BASE}export/capability/${id}/csv`);          if (!res.ok) {
-            toast.error(`Failed to export capability ${id}`);
-            continue;
-          }
-          const blob = await res.blob();
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          const cap = capabilities.find((c) => c.id === id);
-          a.href = url;
-          a.download = cap ? `${cap.name.replace(/\s+/g, '_')}_export.csv` : `capability_${id}_export.csv`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          window.URL.revokeObjectURL(url);
-        }
-      }
+      };
 
-      toast.success(`${ids.length} CSV file${ids.length > 1 ? 's' : ''} downloaded`);
+      const res = await fetch(apiUrl('export/capabilities/csv'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'Export failed');
+      const blob = await res.blob();
+
+      const filename = ids.length === 1
+        ? (() => {
+            const cap = capabilities.find((c) => c.id === ids[0]);
+            return cap
+              ? `${cap.name.replace(/\s+/g, '_')}_export.csv`
+              : `capability_${ids[0]}_export.csv`;
+          })()
+        : 'capabilities_export.csv';
+      downloadCsv(blob, filename);
+
+      toast.success(`${ids.length} capabilit${ids.length === 1 ? 'y' : 'ies'} exported to CSV`);
       setIsExportModalOpen(false);
       setSelectedExportCapIds(new Set());
     } catch (e) {

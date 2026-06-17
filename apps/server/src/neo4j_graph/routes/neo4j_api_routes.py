@@ -641,107 +641,195 @@ async def get_prompt_template(process_level: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class BulkExportRequest(BaseModel):
+    ids: List[int]
+
+
+CSV_EXPORT_HEADERS = [
+    'Vertical',
+    'Sub-Vertical',
+    'Capability Name',
+    'Capability Description',
+    'Process Name',
+    'Process Description',
+    'Subprocess Name',
+    'Subprocess Description',
+    'Subprocess Category',
+    'Data Entities',
+    'Data Entity Description',
+    'Data Elements',
+    'Data Element Description',
+    'Organization Units',
+    'Applications',
+]
+
+
+def _format_data_entities(data_entities: list) -> tuple[str, str, str, str]:
+    entity_names = []
+    entity_descriptions = []
+    element_names = []
+    element_descriptions = []
+
+    for de in data_entities:
+        entity_name = de.get("data_entity_name", "")
+        entity_desc = de.get("data_entity_description", "")
+        if entity_name:
+            entity_names.append(entity_name)
+            entity_descriptions.append(entity_desc or "")
+
+        for elem in de.get("data_elements", []):
+            elem_name = elem.get("data_element_name", "")
+            elem_desc = elem.get("data_element_description", "")
+            if elem_name:
+                element_names.append(f"{elem_name} ({entity_name})" if entity_name else elem_name)
+                element_descriptions.append(elem_desc or "")
+
+    return (
+        ", ".join(entity_names),
+        ", ".join(entity_descriptions),
+        "; ".join(element_names),
+        "; ".join(element_descriptions),
+    )
+
+
+def _build_capability_csv_rows(capability: dict) -> list[list]:
+    rows = []
+    vertical = capability.get("vertical", "")
+    subvertical = capability.get("subvertical", "")
+    cap_name = capability.get("name", "")
+    cap_desc = capability.get("description", "")
+    org_units_str = ", ".join(capability.get("org_units", []))
+
+    processes = capability.get("processes", [])
+    if not processes:
+        rows.append([
+            vertical, subvertical, cap_name, cap_desc,
+            "", "", "", "", "",
+            "", "", "", "",
+            org_units_str, "",
+        ])
+        return rows
+
+    for proc in processes:
+        proc_name = proc.get("name", "")
+        proc_desc = proc.get("description", "")
+
+        subprocesses = proc.get("subprocesses", [])
+        if not subprocesses:
+            rows.append([
+                vertical, subvertical, cap_name, cap_desc,
+                proc_name, proc_desc,
+                "", "", "",
+                "", "", "", "",
+                org_units_str, "",
+            ])
+            continue
+
+        for subproc in subprocesses:
+            data_entities = subproc.get("data_entities", [])
+            (
+                data_entity_names,
+                data_entity_descs,
+                data_elements_str,
+                data_element_descs,
+            ) = _format_data_entities(data_entities)
+            applications_str = ", ".join(subproc.get("applications", []))
+
+            rows.append([
+                vertical, subvertical, cap_name, cap_desc,
+                proc_name, proc_desc,
+                subproc.get("name", ""),
+                subproc.get("description", ""),
+                subproc.get("category", ""),
+                data_entity_names,
+                data_entity_descs,
+                data_elements_str,
+                data_element_descs,
+                org_units_str,
+                applications_str,
+            ])
+
+    return rows
+
+
+def _build_capabilities_csv(capabilities: list[dict]) -> str:
+    import io
+    import csv
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(CSV_EXPORT_HEADERS)
+
+    for capability in capabilities:
+        for row in _build_capability_csv_rows(capability):
+            writer.writerow(row)
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def _csv_streaming_response(csv_content: str, filename: str):
+    import io
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(
+        io.BytesIO(csv_content.encode('utf-8')),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 @router.get("/export/capability/{capability_id}/csv")
 async def export_capability_csv(capability_id: int):
-    """Export capability as CSV"""
+    """Export a single capability as CSV"""
     try:
-        import io
-        import csv
-        from fastapi.responses import StreamingResponse
-        
-        # Fetch capability with full hierarchy from Neo4j
         capability = CapabilityService.get_capability_by_id(capability_id)
         if not capability:
             raise HTTPException(status_code=404, detail="Capability not found")
-        
-        # Build CSV data
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write headers
-        headers = [
-            'Vertical',
-            'Sub-Vertical',
-            'Capability Name',
-            'Capability Description',
-            'Process Name',
-            'Process Level',
-            'Process Category',
-            'Process Description',
-            'Subprocess Name',
-            'Subprocess Description',
-            'Subprocess Category',
-            'Data Entities',
-            'Data Elements',
-        ]
-        writer.writerow(headers)
-        
-        # Write data rows
-        vertical = capability.get("vertical", "")
-        subvertical = capability.get("subvertical", "")
-        cap_name = capability.get("name", "")
-        cap_desc = capability.get("description", "")
-        
-        processes = capability.get("processes", [])
-        if not processes:
-            # Write capability row with no processes
-            writer.writerow([vertical, subvertical, cap_name, cap_desc, "", "", "", "", "", "", "", "", ""])
-        else:
-            for proc in processes:
-                proc_name = proc.get("name", "")
-                proc_level = proc.get("level", "")
-                proc_category = proc.get("category", "")
-                proc_desc = proc.get("description", "")
-                
-                subprocesses = proc.get("subprocesses", [])
-                if not subprocesses:
-                    # Write process row with no subprocesses
-                    writer.writerow([
-                        vertical, subvertical, cap_name, cap_desc,
-                        proc_name, proc_level, proc_category, proc_desc,
-                        "", "", "", "", ""
-                    ])
-                else:
-                    for subproc in subprocesses:
-                        subproc_name = subproc.get("name", "")
-                        subproc_desc = subproc.get("description", "")
-                        subproc_category = subproc.get("category", "")
-                        
-                        # Get data entities and elements
-                        data_entities = subproc.get("data_entities", [])
-                        data_entity_names = ", ".join([de.get("data_entity_name", "") for de in data_entities])
-                        
-                        # Flatten data elements
-                        all_elements = []
-                        for de in data_entities:
-                            elements = de.get("data_elements", [])
-                            for elem in elements:
-                                elem_name = elem.get("data_element_name", "")
-                                entity_name = de.get("data_entity_name", "")
-                                all_elements.append(f"{elem_name} ({entity_name})")
-                        data_elements_str = "; ".join(all_elements)
-                        
-                        writer.writerow([
-                            vertical, subvertical, cap_name, cap_desc,
-                            proc_name, proc_level, proc_category, proc_desc,
-                            subproc_name, subproc_desc, subproc_category,
-                            data_entity_names, data_elements_str
-                        ])
-        
-        # Prepare response
-        output.seek(0)
-        filename = f"{cap_name.replace(' ', '_')}_export.csv"
-        
-        return StreamingResponse(
-            io.BytesIO(output.getvalue().encode('utf-8')),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    
+
+        csv_content = _build_capabilities_csv([capability])
+        filename = f"{capability.get('name', 'capability').replace(' ', '_')}_export.csv"
+        return _csv_streaming_response(csv_content, filename)
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to export CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/export/capabilities/csv")
+async def export_capabilities_csv(request: BulkExportRequest):
+    """Export multiple capabilities into a single CSV file"""
+    try:
+        if not request.ids:
+            raise HTTPException(status_code=400, detail="Select at least one capability to export")
+
+        capabilities = []
+        missing_ids = []
+        for capability_id in request.ids:
+            capability = CapabilityService.get_capability_by_id(capability_id)
+            if capability:
+                capabilities.append(capability)
+            else:
+                missing_ids.append(capability_id)
+
+        if not capabilities:
+            raise HTTPException(status_code=404, detail="No capabilities found for export")
+
+        csv_content = _build_capabilities_csv(capabilities)
+        filename = "capabilities_export.csv"
+        if len(capabilities) == 1:
+            filename = f"{capabilities[0].get('name', 'capability').replace(' ', '_')}_export.csv"
+
+        response = _csv_streaming_response(csv_content, filename)
+        if missing_ids:
+            response.headers["X-Missing-Capability-Ids"] = ",".join(str(i) for i in missing_ids)
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to bulk export CSV: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
