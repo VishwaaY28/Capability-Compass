@@ -326,6 +326,17 @@ export default function Home() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [selectedExportCapIds, setSelectedExportCapIds] = useState<Set<number>>(new Set());
   const [isExporting, setIsExporting] = useState(false);
+  const selectAllExportRef = useRef<HTMLInputElement>(null);
+
+  const allExportCapsSelected =
+    capabilities.length > 0 && capabilities.every((c) => selectedExportCapIds.has(c.id));
+  const someExportCapsSelected = capabilities.some((c) => selectedExportCapIds.has(c.id));
+
+  useEffect(() => {
+    if (selectAllExportRef.current) {
+      selectAllExportRef.current.indeterminate = someExportCapsSelected && !allExportCapsSelected;
+    }
+  }, [someExportCapsSelected, allExportCapsSelected, isExportModalOpen]);
 
   const processLevelOptions = [
     'enterprise',
@@ -1460,7 +1471,7 @@ export default function Home() {
                   <div className="px-3 py-2 text-sm text-gray-700 min-h-[38px] flex items-center gap-1 flex-wrap">
                     {selectedExportCapIds.size === 0 ? (
                       <span className="text-gray-400">-- Select capabilities --</span>
-                    ) : selectedExportCapIds.size === capabilities.length ? (
+                    ) : allExportCapsSelected ? (
                       <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full text-xs font-medium">All ({capabilities.length})</span>
                     ) : (
                       Array.from(selectedExportCapIds).map((id) => {
@@ -1482,10 +1493,17 @@ export default function Home() {
                     {/* Select all row */}
                     <label className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-gray-50 border-b border-gray-100">
                       <input
+                        ref={selectAllExportRef}
                         type="checkbox"
                         className="accent-indigo-600 w-4 h-4"
-                        checked={selectedExportCapIds.size === capabilities.length && capabilities.length > 0}
-                        onChange={(e) => setSelectedExportCapIds(e.target.checked ? new Set(capabilities.map((c) => c.id)) : new Set())}
+                        checked={allExportCapsSelected}
+                        onChange={() => {
+                          setSelectedExportCapIds(
+                            allExportCapsSelected
+                              ? new Set()
+                              : new Set(capabilities.map((c) => c.id)),
+                          );
+                        }}
                       />
                       <span className="text-sm font-medium text-gray-700">Select all</span>
                     </label>
