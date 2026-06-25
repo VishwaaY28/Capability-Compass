@@ -22,19 +22,26 @@ yarn install
 The `.env` file contains:
 ```
 VITE_API_BASE_URL=http://localhost:8005
-VITE_PORT=5173
+VITE_PORT=8500
 ```
 
 Adjust these if your backend runs on a different port.
 
 ## Development
 
-Start the development server:
+Start the frontend server:
 ```bash
+cd apps/client
 npm run dev
 ```
 
-The app will be available at `http://localhost:5173`
+The app will be available at `http://localhost:8500`
+
+Start the backend server:
+```bash
+cd apps/server/src
+python main.py
+```
 
 ## Building for Production
 
