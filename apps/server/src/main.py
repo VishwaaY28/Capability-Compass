@@ -16,6 +16,7 @@ from neo4j_graph.routes.query_routes import router as neo4j_query_router
 from neo4j_graph.routes.neo4j_api_routes import router as neo4j_api_router
 from neo4j_graph.routes.upload_routes import router as upload_router
 from neo4j_graph.routes.chat_routes import router as chat_router
+from neo4j_pmo.routes.pmo_subtree_routes import router as pmo_subtree_router
 
 # Configure logging BEFORE creating FastAPI app
 logging.basicConfig(
@@ -48,6 +49,7 @@ app.include_router(neo4j_capability_router, prefix="/api")
 app.include_router(neo4j_query_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(pmo_subtree_router, prefix="/api")
 
 
 @app.on_event("startup")

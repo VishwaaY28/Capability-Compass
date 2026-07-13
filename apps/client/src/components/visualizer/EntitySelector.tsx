@@ -1,4 +1,5 @@
 import type { EntityType, EntityListItem } from './types'
+import { truncateLabel } from './utils/truncateLabel'
 
 interface EntitySelectorProps {
   entityType: EntityType
@@ -46,13 +47,17 @@ export default function EntitySelector({
       <div className="selector-group">
         <label>{entityType}:</label>
         <select
+          className="entity-select-dropdown"
           value={selectedEntityId ?? ''}
           onChange={(e) => setSelectedEntityId(e.target.value ? Number(e.target.value) : null)}
           disabled={loading || entities.length === 0}
+          title={entities.find(e => e.uid === selectedEntityId)?.name}
         >
           <option value="">-- Select --</option>
           {entities.map((entity) => (
-            <option key={entity.uid} value={entity.uid}>{entity.name}</option>
+            <option key={entity.uid} value={entity.uid} title={entity.name}>
+              {truncateLabel(entity.name)}
+            </option>
           ))}
         </select>
       </div>

@@ -3,19 +3,16 @@ import type NVL from '@neo4j-nvl/base'
 import type { Node, Relationship, HitTargets } from '@neo4j-nvl/base'
 import { InteractiveNvlWrapper } from '@neo4j-nvl/react'
 import type { MouseEventCallbacks } from '@neo4j-nvl/react'
-import EntitySelector, { ENTITY_TYPE_SLUG } from '../components/visualizer/EntitySelector'
-import DataSourceSelector from '../components/visualizer/DataSourceSelector'
-import PmoVisualizerSection from '../components/visualizer/PmoVisualizerSection'
-import ControlPanel from '../components/visualizer/ControlPanel'
-import NodeDetails from '../components/visualizer/NodeDetails'
-import type { DataSource } from '../components/visualizer/pmoTypes'
-import { transformApiResponseToNvl } from '../components/visualizer/utils/transformer'
-import type { TraversalNode, TraversalRelationship } from '../components/visualizer/utils/transformer'
-import type { EntityType, EntityListItem, Direction, ApiResponse } from '../components/visualizer/types'
-import { runGraphAnimation, filterValidRelationships } from '../components/visualizer/utils/graphAnimation'
-import '../components/visualizer/visualizer.css'
+import PmoEntitySelector from './PmoEntitySelector'
+import ControlPanel from './ControlPanel'
+import NodeDetails from './NodeDetails'
+import { transformPmoApiResponseToNvl } from './utils/pmoTransformer'
+import type { PmoTraversalNode, PmoTraversalRelationship } from './utils/pmoTransformer'
+import type { PmoFlatGraphResponse, PmoEntityListItem, Direction } from './pmoTypes'
+import { PMO_LEGEND_ITEMS } from './pmoTypes'
+import { runGraphAnimation, filterValidRelationships } from './utils/graphAnimation'
 
-const API_BASE = '/api'
+const API_BASE = '/api/pmo'
 const PATH_HIGHLIGHT_COLOR = '#1976D2'
 const PATH_STROKE_WIDTH = 3
 const NORMAL_STROKE_WIDTH = 1.5
@@ -24,16 +21,17 @@ const MAX_ZOOM = 3.0
 const ZOOM_STEP = 0.25
 const DEFAULT_ZOOM = 1.0
 
-const CompassVisualizer: React.FC = () => {
-  const [dataSource, setDataSource] = useState<DataSource>('compass')
+const PmoVisualizerSection: React.FC = () => {
   const nvlRef = useRef<NVL | null>(null)
-  const [entityType, setEntityType] = useState<EntityType>('Capability')
-  const [entities, setEntities] = useState<EntityListItem[]>([])
-  const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null)
+  const [labels, setLabels] = useState<string[]>([])
+  const [entityType, setEntityType] = useState<string>('')
+  const [entities, setEntities] = useState<PmoEntityListItem[]>([])
+  const [selectedEntityUri, setSelectedEntityUri] = useState<string | null>(null)
   const [depth, setDepth] = useState(1)
   const [direction, setDirection] = useState<Direction>('outgoing')
-  const [allNodes, setAllNodes] = useState<TraversalNode[]>([])
-  const [allRels, setAllRels] = useState<TraversalRelationship[]>([])
+  const [cypherQuery, setCypherQuery] = useState('')
+  const [allNodes, setAllNodes] = useState<PmoTraversalNode[]>([])
+  const [allRels, setAllRels] = useState<PmoTraversalRelationship[]>([])
   const [visibleNodes, setVisibleNodes] = useState<Node[]>([])
   const [visibleRels, setVisibleRels] = useState<Relationship[]>([])
   const [totalLoadedNodes, setTotalLoadedNodes] = useState(0)
@@ -45,28 +43,56 @@ const CompassVisualizer: React.FC = () => {
   const [currentZoom, setCurrentZoom] = useState(DEFAULT_ZOOM)
   const animationRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => { fetchEntities() }, [entityType])
-  useEffect(() => { if (selectedEntityId !== null) fetchSubtree() }, [selectedEntityId, depth, direction])
+  useEffect(() => { fetchLabels() }, [])
+  useEffect(() => {
+    if (entityType) fetchEntities()
+  }, [entityType])
+  useEffect(() => {
+    if (selectedEntityUri !== null) fetchSubtree()
+  }, [selectedEntityUri, depth, direction])
   useEffect(() => () => { if (animationRef.current) clearTimeout(animationRef.current) }, [])
 
-  const animateTraversal = useCallback((nodes: TraversalNode[], rels: TraversalRelationship[]) => {
-    runGraphAnimation(nodes, rels, animationRef, {
+  const applyGraphData = useCallback((data: PmoFlatGraphResponse) => {
+    const { nodes: nvlNodes, rels: nvlRels, parentMap: newParentMap } = transformPmoApiResponseToNvl(data)
+    setAllNodes(nvlNodes)
+    setAllRels(nvlRels)
+    setTotalLoadedNodes(nvlNodes.length)
+    setParentMap(newParentMap)
+    runGraphAnimation(nvlNodes, nvlRels, animationRef, {
       setVisibleNodes,
       setVisibleRels,
       setAnimating,
       onComplete: () => {
-        setTimeout(() => { if (nvlRef.current && nodes.length > 0) nvlRef.current.fit(nodes.map(n => n.id)) }, 200)
+        setTimeout(() => {
+          if (nvlRef.current && nvlNodes.length > 0) nvlRef.current.fit(nvlNodes.map(n => n.id))
+        }, 200)
       },
     })
   }, [])
 
-  async function fetchEntities() {
+  async function fetchLabels() {
     setLoading(true)
     setError(null)
     try {
-      const slug = ENTITY_TYPE_SLUG[entityType]
-      const res = await fetch(`${API_BASE}/subtree/${slug}/all`)
-      if (!res.ok) throw new Error('Failed to fetch entities')
+      const res = await fetch(`${API_BASE}/labels`)
+      if (!res.ok) throw new Error('Failed to fetch PMO labels')
+      const data: string[] = await res.json()
+      setLabels(data)
+      if (data.length > 0) setEntityType(data[0])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function fetchEntities() {
+    if (!entityType) return
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`${API_BASE}/subtree/${encodeURIComponent(entityType)}/all`)
+      if (!res.ok) throw new Error('Failed to fetch PMO entities')
       setEntities(await res.json())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -76,21 +102,42 @@ const CompassVisualizer: React.FC = () => {
   }
 
   async function fetchSubtree() {
-    if (selectedEntityId === null) return
+    if (selectedEntityUri === null || !entityType) return
     setLoading(true)
     setError(null)
     try {
-      const slug = ENTITY_TYPE_SLUG[entityType]
       const depthParam = depth > 0 ? `&depth=${depth}` : ''
-      const res = await fetch(`${API_BASE}/subtree/${slug}/id/${selectedEntityId}?direction=${direction}${depthParam}`)
-      if (!res.ok) throw new Error('Failed to fetch subtree')
-      const data: ApiResponse = await res.json()
-      const { nodes: nvlNodes, rels: nvlRels, parentMap: newParentMap } = transformApiResponseToNvl(data)
-      setAllNodes(nvlNodes)
-      setAllRels(nvlRels)
-      setTotalLoadedNodes(nvlNodes.length)
-      setParentMap(newParentMap)
-      animateTraversal(nvlNodes, nvlRels)
+      const uriParam = encodeURIComponent(selectedEntityUri)
+      const res = await fetch(
+        `${API_BASE}/subtree/${encodeURIComponent(entityType)}/uri?uri=${uriParam}&direction=${direction}${depthParam}`
+      )
+      if (!res.ok) throw new Error('Failed to fetch PMO subtree')
+      const data: PmoFlatGraphResponse = await res.json()
+      applyGraphData(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function executeCypherQuery() {
+    if (!cypherQuery.trim()) return
+    setLoading(true)
+    setError(null)
+    setSelectedEntityUri(null)
+    try {
+      const res = await fetch(`${API_BASE}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: cypherQuery }),
+      })
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}))
+        throw new Error((errBody as { detail?: string }).detail || 'Failed to execute query')
+      }
+      const data: PmoFlatGraphResponse = await res.json()
+      applyGraphData(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -99,12 +146,10 @@ const CompassVisualizer: React.FC = () => {
   }
 
   const computePathToRoot = useCallback((nodeId: string) => {
-    const pathNodes = new Set<string>()
     const pathEdges = new Set<string>()
     const pathDetails: Array<{ name: string; type: string }> = []
     let currentId: string | undefined = nodeId
     while (currentId) {
-      pathNodes.add(currentId)
       const currentNode = allNodes.find(n => n.id === currentId)
       if (currentNode) pathDetails.push({ name: currentNode.captions?.[0]?.value || 'Unknown', type: currentNode.label || 'Node' })
       const parentId = parentMap.get(currentId)
@@ -114,7 +159,7 @@ const CompassVisualizer: React.FC = () => {
       }
       currentId = parentId
     }
-    return { pathNodes, pathEdges, pathDetails }
+    return { pathEdges, pathDetails }
   }, [parentMap, allRels, allNodes])
 
   const clearPathHighlight = useCallback(() => {
@@ -182,39 +227,35 @@ const CompassVisualizer: React.FC = () => {
   }
 
   return (
-    <div className="viz-app">
-        <header className="border-b sticky top-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-50">
-          <div className="container px-6 py-4">
-              <div className="viz-header-row">
-                <div>
-                    <h1 className="text-xl font-semibold">Visualizer</h1>
-                    <p className="text-xs text-muted-foreground">
-                        View your data in a Graphical way.
-                    </p>
-                </div>
-                <DataSourceSelector dataSource={dataSource} setDataSource={setDataSource} />
-              </div>
-          </div>
-      </header>
-      {dataSource === 'compass' && (
+    <>
       <div className="app-controls">
-            <EntitySelector
-              entityType={entityType}
-              setEntityType={setEntityType}
-              entities={entities}
-              selectedEntityId={selectedEntityId}
-              setSelectedEntityId={setSelectedEntityId}
-              loading={loading}
-            />
-            <ControlPanel depth={depth} setDepth={setDepth} direction={direction} setDirection={setDirection} />
-            {animating && <button className="skip-animation-btn" onClick={skipAnimation}>Skip Animation</button>}
+        <PmoEntitySelector
+          labels={labels}
+          entityType={entityType}
+          setEntityType={setEntityType}
+          entities={entities}
+          selectedEntityUri={selectedEntityUri}
+          setSelectedEntityUri={setSelectedEntityUri}
+          loading={loading}
+        />
+        <ControlPanel depth={depth} setDepth={setDepth} direction={direction} setDirection={setDirection} />
+        <div className="selector-group pmo-query-group">
+          <label>Query:</label>
+          <input
+            type="text"
+            className="pmo-query-input"
+            value={cypherQuery}
+            onChange={(e) => setCypherQuery(e.target.value)}
+            placeholder="MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 50"
+            onKeyDown={(e) => { if (e.key === 'Enter') executeCypherQuery() }}
+          />
+          <button className="pmo-query-btn" onClick={executeCypherQuery} disabled={loading || !cypherQuery.trim()}>
+            Execute
+          </button>
+        </div>
+        {animating && <button className="skip-animation-btn" onClick={skipAnimation}>Skip Animation</button>}
       </div>
-      )}
 
-      {dataSource === 'PMO' ? (
-        <PmoVisualizerSection />
-      ) : (
-        <>
       {error && <div className="error-message">{error}</div>}
 
       <div className="app-main">
@@ -248,8 +289,8 @@ const CompassVisualizer: React.FC = () => {
               />
             </div>
           ) : (
-            !loading && selectedEntityId === null && (
-              <div className="empty-state"><p>Select an entity type and item to visualize its graph</p></div>
+            !loading && selectedEntityUri === null && totalLoadedNodes === 0 && (
+              <div className="empty-state"><p>Select an entity type and item, or run a Cypher query to visualize</p></div>
             )
           )}
         </div>
@@ -258,18 +299,15 @@ const CompassVisualizer: React.FC = () => {
       </div>
 
       <div className="legend">
-        <span className="legend-item"><span className="dot capability"></span>Capability</span>
-        <span className="legend-item"><span className="dot process"></span>Process</span>
-        <span className="legend-item"><span className="dot subprocess"></span>Subprocess</span>
-        <span className="legend-item"><span className="dot dataentity"></span>Data Entity</span>
-        <span className="legend-item"><span className="dot dataelement"></span>Data Element</span>
-        <span className="legend-item"><span className="dot orgunit"></span>Org Unit</span>
-        <span className="legend-item"><span className="dot applicationcatalog"></span>Application</span>
+        {PMO_LEGEND_ITEMS.map((item) => (
+          <span key={item.label} className="legend-item">
+            <span className={`dot ${item.className}`} style={{ backgroundColor: item.color }}></span>
+            {item.label}
+          </span>
+        ))}
       </div>
-        </>
-      )}
-    </div>
+    </>
   )
 }
 
-export default CompassVisualizer
+export default PmoVisualizerSection
