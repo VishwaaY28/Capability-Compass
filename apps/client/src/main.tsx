@@ -11,6 +11,9 @@ import CompassChat from './pages/compassChat';
 import CompassIngestion from './pages/compassIngestion';
 import Error from './pages/Error';
 import ResearchAgent from './pages/researchAgent';
+import WorkspacesPage from './pages/workspaces';
+import WorkspaceDetailPage from './pages/workspaceDetail';
+import WorkspaceDocumentPage from './pages/workspaceDocument';
 import ErrorBoundary from './components/ErrorBoundary';
 
 const router = createBrowserRouter([
@@ -32,6 +35,21 @@ const router = createBrowserRouter([
       {
         path: 'capabilities',
         element: <CompassMaster />,
+        errorElement: <Error />,
+      },
+      {
+        path: 'workspaces',
+        element: <WorkspacesPage />,
+        errorElement: <Error />,
+      },
+      {
+        path: 'workspaces/:workspaceId',
+        element: <WorkspaceDetailPage />,
+        errorElement: <Error />,
+      },
+      {
+        path: 'workspaces/:workspaceId/documents/:documentId',
+        element: <WorkspaceDocumentPage />,
         errorElement: <Error />,
       },
       {

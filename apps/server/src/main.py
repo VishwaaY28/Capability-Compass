@@ -17,6 +17,8 @@ from neo4j_graph.routes.neo4j_api_routes import router as neo4j_api_router
 from neo4j_graph.routes.upload_routes import router as upload_router
 from neo4j_graph.routes.chat_routes import router as chat_router
 from neo4j_pmo.routes.pmo_subtree_routes import router as pmo_subtree_router
+from neo4j_graph.routes.workspace_routes import router as workspace_router
+from database import init_db, close_db
 
 # Configure logging BEFORE creating FastAPI app
 logging.basicConfig(
@@ -50,6 +52,26 @@ app.include_router(neo4j_query_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(pmo_subtree_router, prefix="/api")
+app.include_router(workspace_router, prefix="/api")
+
+
+@app.on_event("startup")
+async def _on_startup_init_sqlite():
+    """Initialize Tortoise ORM SQLite connection"""
+    try:
+        await init_db()
+    except Exception as e:
+        logger.error(f"SQLite initialization failed: {e}", exc_info=True)
+        raise
+
+
+@app.on_event("shutdown")
+async def _on_shutdown_close_sqlite():
+    """Close Tortoise ORM SQLite connections"""
+    try:
+        await close_db()
+    except Exception as e:
+        logger.warning(f"SQLite shutdown failed: {e}")
 
 
 @app.on_event("startup")
