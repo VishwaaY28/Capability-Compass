@@ -15,7 +15,7 @@ class Workspace(models.Model):
         table = "workspaces"
 
     def __str__(self) -> str:
-        return self.name
+         return self.name
 
 
 class Document(models.Model):

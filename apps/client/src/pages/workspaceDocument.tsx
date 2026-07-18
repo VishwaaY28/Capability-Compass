@@ -110,7 +110,7 @@ export default function WorkspaceDocumentPage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900">{document.file_name}</h1>
             <p className="mt-1 text-sm text-slate-500">
-              {document.file_size || '—'} · {document.uploaded_at || '—'}
+               {document.file_size || '—'} · {document.uploaded_at || '—'}
             </p>
           </div>
         </div>

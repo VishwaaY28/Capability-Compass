@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiChevronLeft, FiChevronRight,FiEye, FiLogOut,FiUpload, FiHome, FiBarChart, FiLayers, FiSettings, FiX, FiMessageSquare } from 'react-icons/fi';
+import { FiChevronLeft, FiChevronRight,FiEye, FiLogOut,FiUpload, FiHome, FiBarChart, FiLayers, FiSettings, FiX, FiMessageSquare, FiBriefcase } from 'react-icons/fi';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 
@@ -26,6 +26,7 @@ const Sidebar: React.FC = () => {
 
   const navItems = [
     { label: 'Master Catalog', path: '/dashboard', icon: FiHome },
+    { label: 'Workspace', path: '/dashboard/workspaces', icon: FiBriefcase },
     { label: 'Compass Ingestion', path: '/dashboard/compass-ingestion', icon: FiUpload },
     { label: 'Compass Chat', path: '/dashboard/compass-chat', icon: FiMessageSquare },
     { label: 'Look-It-Up', path: '/dashboard/research-agent', icon: FiLayers },
@@ -134,7 +135,10 @@ const Sidebar: React.FC = () => {
       <nav className="flex-1 p-4 space-y-2">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive = location.pathname === item.path;
+          const isActive =
+            item.path === '/dashboard'
+              ? location.pathname === '/dashboard' || location.pathname === '/dashboard/capabilities'
+              : location.pathname === item.path || location.pathname.startsWith(`${item.path}/`);
 
           return (
             <NavLink

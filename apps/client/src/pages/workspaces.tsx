@@ -311,7 +311,7 @@ export default function WorkspacesPage() {
                       onClick={() => openEditModal(workspace)}
                       className="block w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
                     >
-                      Edit name
+                       Edit name
                     </button>
                     <button
                       onClick={() => openDeleteModal(workspace)}

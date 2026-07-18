@@ -20,7 +20,7 @@ from neo4j_pmo.routes.pmo_subtree_routes import router as pmo_subtree_router
 from neo4j_graph.routes.workspace_routes import router as workspace_router
 from database import init_db, close_db
 
-# Configure logging BEFORE creating FastAPI app
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

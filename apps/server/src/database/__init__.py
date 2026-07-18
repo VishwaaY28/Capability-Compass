@@ -4,7 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# SQLite file lives next to the server src package
+
 _DB_PATH = Path(__file__).resolve().parent.parent / "db.sqlite3"
 DB_URL = f"sqlite://{_DB_PATH.as_posix()}"
 

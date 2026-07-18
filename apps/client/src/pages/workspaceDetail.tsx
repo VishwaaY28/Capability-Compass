@@ -117,7 +117,7 @@ export default function WorkspaceDetailPage() {
           <h1 className="text-xl font-semibold text-slate-900">Workspace View</h1>
           <nav className="mt-1 text-sm text-slate-500">
             <Link to="/dashboard/workspaces" className="font-medium text-sky-600 hover:text-sky-700">
-              Workspaces
+               Workspaces
             </Link>
             <span className="mx-2 text-slate-400">›</span>
             <span className="text-slate-900">{workspace.name}</span>
