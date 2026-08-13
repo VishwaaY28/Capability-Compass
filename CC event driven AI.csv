@@ -1,0 +1,15 @@
+Vertical,Sub Vertical,Capability Name,Process,Sub Process,Data Entity,Data Element
+Financial Services,Wealth Management,Client Opportunity Identification,Wealth Client Prospecting,Event Detection ,Client activity,"Transaction Analytics,
+Savings Behaviour"
+Financial Services,Wealth Management,Client Opportunity Identification,Wealth Client Prospecting,Personalised Recommendations,Base profile,"Customer profile,
+Financial Profile,
+Predicted event"
+Financial Services,Wealth Management,Client Opportunity Identification,Wealth Client Prospecting,Advisor Insights,Client Suitability,"Risk profile,Behaviour analytics
+"
+Financial Services,Wealth Management,Client Opportunity Identification,Wealth Client Prospecting,Client Sentiment,Client  Needs Profile,"Event prediction,Call Transcripts,Advisor Notes, 
+Key financial gaps
+"
+Financial Services,Wealth Management,Client Opportunity Identification,Wealth Client Prospecting,Workflow Orchestration,Task Log,"CRM tasks,Workflow ID, name, version, owner, status,Approver, decision, comments, timestamp,
+Advisor notifications,
+Confirmed intent,
+Client outreach workflows"
